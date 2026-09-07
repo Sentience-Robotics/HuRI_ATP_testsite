@@ -1,0 +1,19 @@
+# Authelia file-backend user database (rendered by templatefile() from authelia.tf).
+#
+# Demo multi-user store, rendered over var.authelia_users. Generate each argon2
+# hash with:
+#   authelia crypto hash generate argon2 --password '<your-password>'
+# and store it in GCP Secret Manager under the user's `password_secret` id (see
+# deploy README §1). Add a user by appending to var.authelia_users and creating
+# its secret; switch authentication_backend to LDAP for real deployments.
+
+users:
+%{ for u in users ~}
+  ${u.username}:
+    disabled: false
+    displayname: '${u.display}'
+    password: '${u.password}'
+    email: '${u.email}'
+    groups:
+      - users
+%{ endfor ~}

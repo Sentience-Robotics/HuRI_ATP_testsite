@@ -1,0 +1,40 @@
+# Cluster locator — must match the HuRI Terraform that created the cluster.
+project_id   = "your-gcp-project-id"
+region       = "europe-west4"
+cluster_name = "huri-ray-cluster"
+# huri_namespace = "huri"   # namespace the HuRI app runs in
+
+# Authelia / OIDC (non-secret values). The website is the OIDC relying party.
+auth_host      = "auth.huri.example.com"
+cookie_domain  = "example.com"
+website_origin = "https://app.huri.example.com"
+oidc_client_id = "huri-website"
+
+# Demo Authelia users default to demo/demo2/demo3 (see var.authelia_users). Each
+# needs its argon2 hash stored in Secret Manager under its password_secret id.
+# Uncomment to change the roster:
+# authelia_users = [
+#   { username = "demo", display = "Demo User", email = "demo@example.com", password_secret = "authelia_user_password_hash" },
+# ]
+
+# Website backend image (built/pushed into HuRI's Artifact Registry — the "GCR",
+# owned by the HuRI Terraform). These reconstruct the image reference to pull.
+website_image_location = "us-central1"
+website_image_repo     = "huri"
+website_image_name     = "huri-website"
+website_image_tag      = "latest"
+# frontend_url            = ""      # empty = same origin as website_origin
+# website_cookie_samesite = "lax"   # "none" for a cross-site frontend
+# huri_ws_url             = "ws://huri-serve-svc.huri.svc.cluster.local:8000/session"
+
+# Reserved static IP shared by both public hosts via one Ingress (README step 2).
+# Default is fine; override only to match a pre-existing reserved address.
+# ingress_static_ip_name = "huri-ingress-ip"
+
+# -----------------------------------------------------------------------------
+# Secrets are NOT set here and are NOT Terraform variables. They live in GCP
+# Secret Manager and are read by secrets.tf. Create them once, out of band,
+# before applying — see README §1 for the full `gcloud secrets create / versions
+# add` script (and the secretAccessor IAM grant). Secret IDs must match the
+# local.website_secret_ids list in secrets.tf.
+# -----------------------------------------------------------------------------

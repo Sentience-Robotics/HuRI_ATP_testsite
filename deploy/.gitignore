@@ -1,0 +1,12 @@
+# Terraform state, plans, and local init artifacts.
+# (.terraform.lock.hcl is intentionally committed — it pins provider versions.)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+
+# Real variable values (may contain non-secret but environment-specific config).
+terraform.tfvars
+*.auto.tfvars

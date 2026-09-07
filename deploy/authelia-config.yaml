@@ -1,0 +1,70 @@
+# Authelia configuration (rendered by templatefile() from authelia.tf and stored
+# as a Kubernetes Secret — it embeds real secrets and the OIDC issuer private key).
+#
+# Authelia is the identity provider for the HuRI website: it authenticates users
+# and mints a stable, opaque per-user `sub` (a UUID) over OIDC. The website
+# backend is the relying party; it puts that `sub` on the HuRI session as
+# `user_id`, which becomes the RAG `_user_id` partition key. That is the "UUID
+# HuRI manages".
+
+theme: light
+
+server:
+  address: 'tcp://0.0.0.0:9091'
+
+log:
+  level: info
+
+# Demo identity store: a flat-file user database (mounted alongside this file).
+# Swap for `ldap:` in production.
+authentication_backend:
+  file:
+    path: /config/users_database.yml
+    password:
+      algorithm: argon2
+
+# Every authenticated user is allowed; OIDC consent still applies per client.
+access_control:
+  default_policy: one_factor
+
+session:
+  name: authelia_session
+  secret: '${session_secret}'
+  cookies:
+    - domain: '${cookie_domain}'
+      authelia_url: 'https://${auth_host}'
+      default_redirection_url: '${website_origin}'
+
+storage:
+  encryption_key: '${storage_encryption_key}'
+  local:
+    path: /data/db.sqlite3
+
+# Demo notifier (password-reset links land in a file). Use `smtp:` in production.
+notifier:
+  filesystem:
+    filename: /data/notification.txt
+
+identity_validation:
+  reset_password:
+    jwt_secret: '${jwt_secret}'
+
+identity_providers:
+  oidc:
+    hmac_secret: '${oidc_hmac_secret}'
+${oidc_jwks_block}
+    clients:
+      - client_id: '${oidc_client_id}'
+        client_name: 'HuRI Website'
+        client_secret: '${oidc_client_secret_hash}'
+        public: false
+        authorization_policy: one_factor
+        require_pkce: true
+        pkce_challenge_method: S256
+        redirect_uris:
+          - '${website_origin}/auth/callback'
+        scopes:
+          - openid
+          - profile
+          - email
+        userinfo_signed_response_alg: none
