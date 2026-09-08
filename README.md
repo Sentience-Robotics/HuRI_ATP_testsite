@@ -1,4 +1,4 @@
-# HuRI test website
+# HuRI ATP test website
 
 A browser-based testing console for [HuRI](https://github.com/Sentience-Robotics/HuRI) — lets a
 tester pick any module combination (voice in, RAG, TTS, gesture, emotion...), launch HuRI itself
