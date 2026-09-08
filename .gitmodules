@@ -1,0 +1,3 @@
+[submodule "HuRI"]
+	path = HuRI
+	url = https://github.com/Sentience-Robotics/HuRI.git
