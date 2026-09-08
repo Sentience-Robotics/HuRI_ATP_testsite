@@ -1,77 +1,137 @@
-Here is a complete architectural plan to build this system, breaking down the frontend, backend, and the AI model pipelines.
+# HuRI test website
 
-### 1. System Architecture Overview
+A browser-based testing console for [HuRI](https://github.com/Sentience-Robotics/HuRI) — lets a
+tester pick any module combination (voice in, RAG, TTS, gesture, emotion...), launch HuRI itself
+with a chosen deployment config, and drive a live session from a chat-style UI instead of a
+terminal. Built to exercise every row of the ATP, the test plan this whole site is designed
+around.
 
-Your application will use a **bidirectional WebSocket stream**. As soon as the client connects, the Python backend will trigger the pipeline: it will generate the texture from the hardcoded string, synthesize the audio from text using CosyVoice2, pass that audio to EMAGE to generate the 3D motion data, and finally stream everything back to the frontend for synchronized playback.
+## Prerequisites
 
-### 2. Local Inference Links
+1. **The HuRI submodule checked out.** HuRI is vendored at `HuRI/` as a git submodule, not a
+   plain folder — if it's empty, run:
+   ```bash
+   git submodule update --init
+   ```
 
-Before building, you will need to clone and set up the local inference environments for both AI models:
+2. **HuRI itself, installed** — venv, downloaded models, and a generated Ray Serve config. Run
+   HuRI's own installer *inside the submodule*:
+   ```bash
+   cd HuRI
+   ./scripts/install_local.sh --yes
+   ```
+   This also sets up the two things HuRI needs at runtime:
+   - **Qdrant** (RAG's vector memory) — started as a local Docker container (`huri-qdrant`) on
+     `localhost:6333`, unless you pass `--skip-services` because one is already running (e.g.
+     from another HuRI checkout on the same machine — Qdrant/Ollama are shared, machine-wide
+     services, not per-checkout).
+   - **Ollama** (LLM + embeddings) — installed and pulled with whatever models the capability
+     plan picks (e.g. `mistral:7b`, `bge-m3`), reachable at `localhost:11434`.
 
-* **EMAGE (Gestures):** The official maintained repository for EMAGE inference is now unified under the PantoMatrix repository.
-* **Link:** [https://github.com/PantoMatrix/PantoMatrix](https://github.com/PantoMatrix/PantoMatrix)
-* *Note:* You can run local inference using `test_camn_audio.py` for EMAGE (full body + face) which accepts an audio file and outputs SMPL-X and FLAME parameters.
+   If you already have a working HuRI checkout elsewhere with Qdrant/Ollama already running,
+   you can skip re-provisioning those two: `./scripts/install_local.sh --yes --skip-services`.
+   See `HuRI/scripts/install_local.sh --help` for GPU/CPU profile flags.
 
+3. **Node.js** (for the frontend) and **Python 3.11+** (for this site's own backend — separate
+   from HuRI's venv, see below).
 
-* **CosyVoice2-0.5B (Audio):** The official repository from FunAudioLLM.
-* **Link:** [https://github.com/FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice)
-* *Note:* It supports streaming inference (`vLLM` engine) which will be critical for achieving the low latency you want.
+## Running it
 
+The one-shot way:
 
+```bash
+./scripts/run_all.sh
+```
 
----
+This starts the backend (`:8001`) and frontend (`:5173`) and waits on both — Ctrl-C stops them
+cleanly (including HuRI itself, if you started it from the Control Panel in the meantime). It
+does **not** start HuRI automatically: open `http://localhost:5173`, use the **HuRI Control
+Panel** button in the top bar, pick a config from the dropdown, and hit Start. That's deliberate —
+see "Configuring HuRI" below for why launching HuRI is a UI action rather than baked into the
+script.
 
-### 3. Backend Strategy (Python + FastAPI)
+To run the pieces separately (e.g. while iterating on just one of them):
 
-You need an asynchronous backend capable of streaming binary data (audio) and JSON data (gesture frames) concurrently. **FastAPI** is the best choice here due to its native ASGI and WebSocket support.
+```bash
+./scripts/run_backend.sh    # FastAPI on :8001, auto-creates backend/.venv
+./scripts/run_frontend.sh   # Vite dev server on :5173, auto-runs npm install
+```
 
-**The Pipeline Flow on Connection:**
+Both scripts auto-detect the HuRI checkout (the submodule at `HuRI/`, falling back to a sibling
+`../HuRI` checkout for anyone still working that way) and point the HuRI Control Panel's
+`serve`/`ray` binaries at that checkout's own venv. Override with `HURI_REPO_PATH` if yours lives
+somewhere else.
 
-1. **Client Connects:** The WebSocket connection is established.
-2. **Texture Generation:** A background task takes your hardcoded string (e.g., `"Cyberpunk leather jacket and neon jeans"`) and pings an image generation API (like Stable Diffusion or OpenAI's DALL-E 3 API) to generate a diffuse texture map. The resulting image URL/bytes are sent to the frontend immediately.
-3. **Audio Generation:** The text script is fed into `CosyVoice2-0.5B`. Because CosyVoice2 supports bi-streaming, it can yield audio chunks in real-time (as low as 150ms latency).
-4. **Gesture Generation:** As audio chunks are generated, they are buffered and fed into the `EMAGE` model. EMAGE processes the speech audio and outputs 3D motion parameters (SMPL-X/FLAME or ARKit blendshapes).
-5. **Streaming:** The backend packages the audio chunk and its corresponding chunk of motion frames into a unified payload and sends it down the WebSocket.
+By default `REQUIRE_AUTH=0` (`run_all.sh` sets this) — no Authelia needed, every visitor is
+treated as one open `anonymous` session. See **Auth** below to turn on the real login flow.
 
-**Key Backend Technologies:**
+## Configuring HuRI (the Control Panel)
 
-* **FastAPI:** For WebSocket management.
-* **Librosa / Soundfile:** For audio chunking and processing between CosyVoice and EMAGE.
-* **PyTorch:** To run the local inference for both models.
+HuRI itself is launched and stopped from inside the website, not from a terminal — that's
+`backend/huri_launcher.py` spawning/supervising a `serve run <config>.yaml` subprocess on the
+machine running the backend, and the **HuRI Control Panel** (top bar button) is its UI: pick a
+config, watch it come up, tail its logs, jump to the Ray dashboard, and open a pre-configured
+client tab.
 
----
+The config dropdown lists two kinds of files:
+- the bare `HuRI/config/huri*.yaml` files (e.g. `huri.yaml`, `huri_cpu.yaml`, and whatever
+  `install_local.sh` generated as `huri_local.generated.yaml`), and
+- per-ATP-feature copies under this repo's own `presets/F*/huri*.yaml` — see `presets/README.md`
+  for which folder copies which config and why.
 
-### 4. Frontend Strategy (React + Three.js)
+Only one HuRI instance can run at a time (it binds fixed local ports), so Start is disabled while
+one is already up.
 
-For the frontend, the gold standard for rendering interactive 3D in the browser is **React Three Fiber (R3F)**, which is a React wrapper around **Three.js**.
+## Testing a session
 
-**Core Components:**
+Once HuRI is running, the app's default connection uses a minimal `rag`-only handshake so it
+comes up immediately. From there:
 
-1. **The 3D Model:** You will need a `.glb` or `.gltf` character model that has a skeletal rig compatible with SMPL-X (the skeleton format EMAGE uses) and morph targets (blendshapes) for the face.
-2. **Dynamic Texturing:**
-* When the WebSocket receives the generated texture image, you will use Three.js's `TextureLoader` to load the image and map it to your character's `MeshStandardMaterial.map` property.
+- **Event Configuration** (gear icon) — pick a named preset or a custom module combination for
+  the session. Modules HuRI hasn't actually deployed (e.g. `tts`/`gesture` on a machine with no
+  GPU) are greyed out and can't be selected — checked live against `GET /huri-modules`, which
+  proxies HuRI's own `/modules` endpoint.
+- **Composer** — type text or use the mic; the event dropdown picks which topic a typed message
+  targets (`rag.in` through the full pipeline, or `rag.out` straight at TTS/gesture, bypassing
+  RAG — see the ATP's F7-F9 rows).
+- **Chat panel** — each message can be expanded to show its linked emotion reading and the
+  RAG-augmented prompt that was actually sent to the LLM.
+- **Avatar** — only rendered when the active session includes the `gesture` module.
 
+`presets/` holds the module-combination JSON files behind the Event Configuration dropdown,
+organized to mirror the ATP's feature rows one-to-one (`F2/` through `F11/`) — see
+`presets/README.md` for the full convention, including how to add a new preset (drop a `.json`
+file in, no restart needed).
 
-3. **Synchronization (The tricky part):**
-* **Audio Playback:** Use the Web Audio API to queue and play the incoming audio chunks seamlessly.
-* **Animation Loop:** R3F has a `useFrame` hook that runs at 60 FPS. You will maintain an array of the motion parameters received from the backend.
-* You must sync the character's bone rotations (quaternions) and facial blendshape weights to the `currentTime` of the Web Audio API context. If the audio is at 2.5 seconds, the `useFrame` loop should look up the EMAGE motion frame corresponding to 2.5 seconds and apply those rotations to the 3D model's bones.
+## Auth
 
+Three modes, picked by what's set in the backend's environment (see `backend/main.py`):
 
+| Mode | Set | Behaviour |
+|---|---|---|
+| Open (local dev) | `REQUIRE_AUTH=0` | No login screen; every session is `user_id=anonymous`. |
+| Authelia (OIDC) | `REQUIRE_AUTH=1`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SESSION_SECRET` | Real login via `/auth/login`; the OIDC `sub` becomes the HuRI `user_id` (scopes RAG memory per user). |
+| Magic link (demo) | `MAGIC_LINK_SECRET` | A signed token redeemed at `/auth/magic` drops the same session an OIDC login would, without running Authelia. The minting tool `main.py` refers to (`tools/make_magic_qr.py`) doesn't exist yet — see **Known gaps**. |
 
-**Recommended Frontend Libraries:**
+`SESSION_SECRET` is required whenever `REQUIRE_AUTH=1` — the backend refuses to start without one
+rather than fall back to a public default, since it's what makes the session cookie unforgeable.
 
-* `three` and `@react-three/fiber` (Core 3D rendering)
-* `@react-three/drei` (Useful helpers like `useGLTF` for loading the model and `OrbitControls` for camera movement)
-* `zustand` (For managing the streaming state and buffering the gesture frames without causing React re-renders).
+## Key environment variables
 
----
+| Variable | Default | Purpose |
+|---|---|---|
+| `HURI_REPO_PATH` | submodule at `HuRI/`, else sibling `../HuRI` | Where the backend imports `src.interfaces.web_interface` from, and where the Control Panel looks for `config/huri*.yaml` |
+| `HURI_URL` | `ws://localhost:8000/session` | Where `web_interface.py`'s `Client` connects to reach a running HuRI |
+| `HURI_SERVE_BIN` / `HURI_RAY_BIN` | plain `serve`/`ray` (PATH); `run_backend.sh` points these at `<HURI_REPO_PATH>/.venv/bin/{serve,ray}` when that venv exists | Binaries the Control Panel uses to launch/stop HuRI |
+| `HURI_PRESETS_DIR` | `<repo root>/presets` | Where `/presets` and the Control Panel's config list are scanned from |
+| `VITE_BACKEND_URL` | `http://localhost:8001` | Backend origin the frontend talks to (build-time env var) |
+| `REQUIRE_AUTH` | `0` in `run_all.sh`, `1` otherwise | See **Auth** above |
 
-### 5. Implementation Roadmap
+## Known gaps
 
-If I were to build this, I would follow this strict order to avoid integration nightmares:
-
-1. **Stand up the AI locally first:** Write an isolated Python script that proves you can successfully pass text to CosyVoice2, save the `.wav`, and pass that `.wav` into EMAGE to get the `.npz` motion file. If this local pipeline fails, the web app won't work.
-2. **Build the static frontend:** Load a static 3D model in React Three Fiber. Prove that you can manually change its texture using a local image file, and manually apply a static rotation to its bones.
-3. **Build the WebSocket bridge:** Connect the FastAPI backend to the React frontend. Send dummy data (e.g., a simple sine wave for audio and a simple repeating rotation for the arm) to ensure your playback synchronization logic works perfectly.
-4. **Connect the real pipeline:** Swap the dummy data out for the live outputs of CosyVoice and EMAGE.
+- `backend/Dockerfile` isn't wired up for a real deployment yet — it doesn't include HuRI's
+  `src/` tree or the repo-root `presets/` folder in its build context (see the `TODO(deploy)`
+  comments at its top). Local dev via the scripts above is unaffected.
+- The magic-link auth mode's redemption endpoint (`/auth/magic`) works, but the tool to mint a
+  valid token (`tools/make_magic_qr.py`, referenced in `main.py`'s comments) hasn't been written
+  yet — that mode isn't usable until it exists.
