@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Scene from "./components/Scene.jsx";
 import ChatPanel from "./components/ChatPanel.jsx";
 import Composer from "./components/Composer.jsx";
 import EventConfigModal from "./components/EventConfigModal.jsx";
+import LauncherPanel from "./components/LauncherPanel.jsx";
 import { useWebSocket } from "./hooks/useWebSocket.js";
+import { useHuriStatus } from "./hooks/useHuriStatus.js";
 import useStore from "./store/index.js";
 import { BACKEND_URL } from "./config.js";
 
@@ -15,6 +17,7 @@ const DEFAULT_MODULES = {
 };
 
 const STATUS_LABELS = {
+  idle: "Waiting for HuRI",
   connecting: "Connecting…",
   connected: "Connected",
   error: "Connection error",
@@ -66,13 +69,54 @@ function CenteredMessage({ text, children }) {
 }
 
 function TestingApp({ user }) {
-  useWebSocket(DEFAULT_MODULES);
+  // HuRI is launched on demand from the Control Panel rather than
+  // auto-starting on page load (it's a real local process, not something to
+  // spin up just because a tab was opened) — so the panel opens by itself on
+  // first load, asking the visitor to start HuRI, and the client websocket
+  // only connects once the launcher reports it's actually running.
+  const { status: huriStatus } = useHuriStatus();
+  const huriRunning = huriStatus?.status === "running";
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [launcherOpen, setLauncherOpen] = useState(true);
+
+  // Auto-close the panel the moment HuRI transitions to running, whether that
+  // was this visitor clicking Start or an instance already running elsewhere
+  // being detected — but only once, so re-opening the panel later (to stop
+  // HuRI, check logs, etc) doesn't get immediately closed out from under them.
+  const autoClosedRef = useRef(false);
+  useEffect(() => {
+    if (huriRunning && !autoClosedRef.current) {
+      autoClosedRef.current = true;
+      setLauncherOpen(false);
+    }
+  }, [huriRunning]);
+
+  useWebSocket(DEFAULT_MODULES, { enabled: huriRunning });
+
   const connectionStatus = useStore((s) => s.connectionStatus);
   const statusMessage = useStore((s) => s.statusMessage);
   const hasModule = useStore((s) => s.hasModule);
+  const reconfigure = useStore((s) => s.reconfigure);
   const showAvatar = hasModule("gesture");
+
+  // A tab opened from the Control Panel's "Open client tab" (LauncherPanel.jsx)
+  // carries `?preset=<name>` — apply it once `reconfigure` is wired up (after
+  // the initial DEFAULT_MODULES handshake) so this client starts pre-configured
+  // instead of requiring a manual Event Configuration step.
+  const appliedPresetFromUrl = useRef(false);
+  useEffect(() => {
+    if (appliedPresetFromUrl.current || !reconfigure) return;
+    const presetName = new URLSearchParams(window.location.search).get("preset");
+    if (!presetName) return;
+    appliedPresetFromUrl.current = true;
+    fetch(`${BACKEND_URL}/presets`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((presets) => {
+        if (presets[presetName]) reconfigure(presets[presetName]);
+      })
+      .catch(() => {});
+  }, [reconfigure]);
 
   return (
     <div className="app-shell">
@@ -87,6 +131,15 @@ function TestingApp({ user }) {
           >
             {STATUS_LABELS[connectionStatus] ?? connectionStatus}
           </span>
+          <button
+            type="button"
+            className="status-pill"
+            style={{ border: "none" }}
+            onClick={() => setLauncherOpen(true)}
+            title="Launch HuRI with a config and connect client(s) (HuRI/ATP.xlsx F1-F11)"
+          >
+            HuRI Control Panel
+          </button>
           {user?.authenticated && (
             <a
               href={`${BACKEND_URL}/auth/logout`}
@@ -111,6 +164,7 @@ function TestingApp({ user }) {
       <Composer onOpenSettings={() => setSettingsOpen(true)} />
 
       {settingsOpen && <EventConfigModal onClose={() => setSettingsOpen(false)} />}
+      {launcherOpen && <LauncherPanel onClose={() => setLauncherOpen(false)} />}
     </div>
   );
 }

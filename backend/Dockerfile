@@ -10,6 +10,13 @@
 # with a context that includes both repos and COPY HuRI/src in, or vendor it
 # as a git submodule. Not wired up here yet; local dev via run_backend.sh
 # (sibling checkout, same machine) is unaffected.
+#
+# TODO(deploy): huri_presets.py reads the repo-root `presets/` folder (a
+# sibling of this backend/ directory), which is likewise outside this image's
+# build context. Either widen the build context to the repo root and
+# `COPY ../presets ./presets`, or mount presets/ as a volume at runtime and
+# point HURI_PRESETS_DIR at it — otherwise the image falls back to no presets
+# (the Event Configuration modal still works with a custom combination).
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

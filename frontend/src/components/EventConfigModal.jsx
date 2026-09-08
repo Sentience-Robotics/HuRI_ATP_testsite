@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import useStore from "../store/index.js";
 import { BACKEND_URL } from "../config.js";
+import { useAvailableModules, presetIsAvailable } from "../hooks/useAvailableModules.js";
 
 // Mirrors HuRI/src/interfaces/web_interface.py's KNOWN_MODULES allow-list,
 // with a default args block per module (matching HuRI/config/client_full.yaml)
@@ -34,19 +35,12 @@ function selectionFromModules(modules, availableModules) {
   return selection;
 }
 
-/** Whether every module a preset needs is actually deployed on this HuRI
- * instance (unknown availability = don't block anything). */
-function presetIsAvailable(preset, availableModules) {
-  if (!availableModules) return true;
-  return Object.values(preset).every((m) => availableModules.includes(m.name));
-}
-
 export default function EventConfigModal({ onClose }) {
   const sessionConfig = useStore((s) => s.sessionConfig);
   const reconfigure = useStore((s) => s.reconfigure);
 
   const [presets, setPresets] = useState({});
-  const [availableModules, setAvailableModules] = useState(null); // null = unknown
+  const availableModules = useAvailableModules();
   const [presetName, setPresetName] = useState("custom");
   const [selection, setSelection] = useState(() =>
     selectionFromModules(sessionConfig?.modules, null),
@@ -58,10 +52,6 @@ export default function EventConfigModal({ onClose }) {
       .then((r) => r.json())
       .then(setPresets)
       .catch(() => setPresets({}));
-    fetch(`${BACKEND_URL}/huri-modules`)
-      .then((r) => r.json())
-      .then((data) => setAvailableModules(data.modules ?? null))
-      .catch(() => setAvailableModules(null));
   }, []);
 
   const isAvailable = (name) => !availableModules || availableModules.includes(name);

@@ -31,7 +31,7 @@ function int16FramesToFloat32(frames) {
  */
 const useStore = create((set, get) => ({
   // --- connection / session -------------------------------------------
-  connectionStatus: "connecting", // "connecting" | "connected" | "error" | "closed"
+  connectionStatus: "idle", // "idle" | "connecting" | "connected" | "error" | "closed"
   statusMessage: "",
   sessionConfig: null, // {modules, senders, hooks}, echoed back by the backend
   sendTopic: null, // (topic, text) => void, installed by useWebSocket

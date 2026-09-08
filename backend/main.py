@@ -12,7 +12,8 @@ HuRI session protocol (handshake, senders, hooks, wire (de)serialization).
 Frontend <-> backend protocol on ``/ws`` (unchanged from before this refactor):
 
   1. the frontend sends one handshake: ``{"modules": {tag: {name, args}}}``
-     (see ``huri_presets.py`` for ready-made combinations);
+     (see the repo-root ``presets/`` folder, loaded by ``huri_presets.py``,
+     for ready-made combinations);
   2. the backend replies ``{"type": "session_config", "config": {...}}``;
   3. inbound: binary frames are mic PCM (always ``audio.in``); JSON frames are
      ``{"topic": "question"|"token", "text": ...}`` — the frontend's event
@@ -31,24 +32,43 @@ from pathlib import Path
 from typing import Any, Dict
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-# HuRI is a sibling repo, not an installed package: make its `src` package
-# importable before pulling in the interface. Override HURI_REPO_PATH if the
-# two repos aren't checked out side by side.
+# HuRI is not an installed package: make its `src` package importable before
+# pulling in the interface. It's vendored as a git submodule at <repo root>/HuRI
+# (see .gitmodules); fall back to the older sibling-checkout convention
+# (../HuRI next to this repo) for anyone still working that way. Override
+# HURI_REPO_PATH to point elsewhere entirely.
+#
+# Prefer whichever checkout actually has web_interface.py, not just whichever
+# has a `src/` dir: HuRI's own `main` branch doesn't have that module yet (as
+# of this writing it's uncommitted work on a sibling checkout), so a plain
+# `src/` dir isn't enough to tell a real checkout from an empty submodule.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_HURI_SUBMODULE_PATH = _REPO_ROOT / "HuRI"
+_HURI_SIBLING_PATH = _REPO_ROOT.parent / "HuRI"
+
+
+def _has_web_interface(path: Path) -> bool:
+    return (path / "src" / "interfaces" / "web_interface.py").is_file()
+
+
 _HURI_REPO_PATH = os.environ.get(
-    "HURI_REPO_PATH", str(Path(__file__).resolve().parents[2] / "HuRI")
+    "HURI_REPO_PATH",
+    str(_HURI_SUBMODULE_PATH if _has_web_interface(_HURI_SUBMODULE_PATH) else _HURI_SIBLING_PATH),
 )
 if _HURI_REPO_PATH not in sys.path:
     sys.path.insert(0, _HURI_REPO_PATH)
 
 from src.interfaces.web_interface import run_browser_session  # noqa: E402
 
-from huri_presets import PRESETS  # noqa: E402
+from huri_launcher import AlreadyRunningError, HuriLauncher, NotRunningError, UnknownConfigError  # noqa: E402
+from huri_presets import PRESETS_DIR, load_presets  # noqa: E402
 from pipeline import motion_arrays_to_frames  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -259,10 +279,13 @@ async def auth_me(request: Request):
 
 @app.get("/presets")
 async def presets() -> Dict[str, Any]:
-    """Module-combination presets for the Event Configuration modal (see
-    huri_presets.py) — a starting point for a session's ``modules``, covering
-    HuRI/ATP.xlsx F1/F2 without a server restart."""
-    return PRESETS
+    """Module-combination presets for the Event Configuration modal — a
+    starting point for a session's ``modules``, covering HuRI/ATP.xlsx F1/F2
+    without a server restart. Read fresh from the repo-root ``presets/``
+    folder on every call (see huri_presets.py), so a preset file added,
+    edited, or removed there shows up on the next request with no backend
+    restart."""
+    return load_presets()
 
 
 def _huri_http_base() -> str:
@@ -272,6 +295,71 @@ def _huri_http_base() -> str:
     huri_ws_url = os.environ.get("HURI_URL", "ws://localhost:8000/session")
     http_url = huri_ws_url.replace("wss://", "https://").replace("ws://", "http://")
     return http_url.rsplit("/", 1)[0]  # drop the trailing "/session"
+
+
+async def _require_auth(request: Request) -> str:
+    """Gate for routes that do more than read (right now: the HuRI launcher,
+    which spawns real local processes) — same bar as the /ws handshake: a
+    signed-in session when REQUIRE_AUTH is on, open otherwise (local dev
+    without Authelia)."""
+    sub = request.session.get("sub")
+    if REQUIRE_AUTH and not sub:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return sub or "anonymous"
+
+
+# Manages a single local `serve run` subprocess for the HuRI submodule (see
+# huri_launcher.py) — covers HuRI/ATP.xlsx F1 ("launch HuRI with different
+# config files, check the dashboard") without a terminal.
+_launcher = HuriLauncher(
+    Path(_HURI_REPO_PATH), probe_url=_huri_http_base(), presets_dir=PRESETS_DIR
+)
+
+
+class _LauncherStartRequest(BaseModel):
+    config: str
+
+
+@app.get("/launcher/huri/configs")
+async def launcher_configs(_sub: str = Depends(_require_auth)) -> Dict[str, Any]:
+    """Server-side HuRI configs (config/huri*.yaml in the submodule) that can
+    be launched — as opposed to the client_*.yaml configs, which are for a
+    client connecting to an already-running HuRI, not for launching one."""
+    return {"configs": _launcher.list_configs()}
+
+
+@app.get("/launcher/huri/status")
+async def launcher_status(_sub: str = Depends(_require_auth)) -> Dict[str, Any]:
+    return _launcher.status()
+
+
+@app.get("/launcher/huri/logs")
+async def launcher_logs(tail: int = 200, _sub: str = Depends(_require_auth)) -> Dict[str, Any]:
+    return {"lines": _launcher.logs(tail)}
+
+
+@app.post("/launcher/huri/start")
+async def launcher_start(
+    body: _LauncherStartRequest, _sub: str = Depends(_require_auth)
+) -> Dict[str, Any]:
+    try:
+        await _launcher.start(body.config)
+    except UnknownConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except AlreadyRunningError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return _launcher.status()
+
+
+@app.post("/launcher/huri/stop")
+async def launcher_stop(_sub: str = Depends(_require_auth)) -> Dict[str, Any]:
+    try:
+        await _launcher.stop()
+    except NotRunningError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _launcher.status()
 
 
 @app.get("/huri-modules")

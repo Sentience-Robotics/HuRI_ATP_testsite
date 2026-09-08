@@ -447,3 +447,54 @@ button:disabled {
   text-align: center;
   margin-top: 4px;
 }
+
+/* --- HuRI Control Panel (launcher) ------------------------------------ */
+
+.launcher-card {
+  width: min(640px, 92vw);
+}
+
+.launcher-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.launcher-row .modal-select {
+  flex: 1;
+}
+
+.launcher-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.launcher-status-running {
+  color: #8fd18f;
+}
+.launcher-status-starting,
+.launcher-status-stopping {
+  color: var(--accent);
+}
+.launcher-status-crashed {
+  color: var(--danger);
+}
+
+.launcher-log {
+  margin-top: 12px;
+  padding: 12px;
+  background: #14182280;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

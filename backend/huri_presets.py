@@ -7,88 +7,75 @@ frontend lets a tester pick one of these as a starting point (or build a
 custom combination) when configuring a session, covering HuRI/ATP.xlsx F1/F2
 (different module combinations) without needing a server restart.
 
+Presets themselves live as ``<name>.json`` files under the repo-root
+``presets/`` folder (see that folder's README), one preset per file, keyed by
+their path relative to that folder (subfolders included — see below).
+``load_presets()`` re-scans the folder tree on every call, so dropping a new
+file in anywhere under it — or editing/removing one — takes effect on the
+next ``GET /presets`` request with no server restart, and no re-import of
+this module. Override the folder with the ``HURI_PRESETS_DIR`` env var (e.g.
+to point at a mounted volume in a container where the repo root isn't
+present — see backend/Dockerfile's build-context note).
+
 Mirrors HuRI/config/client_full.yaml and HuRI/config/client_text.yaml.
 """
 
+import json
+import logging
+import os
+from pathlib import Path
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 Preset = Dict[str, Dict[str, Any]]
 
-# Full voice pipeline: mic -> stt -> tag -+
-#                                          +-> qag -> rag -> tts -> gesture
-#                       mic -> emo -> eag -+
-FULL_VOICE: Preset = {
-    "mic": {
-        "name": "mic",
-        "args": {
-            "vad_agressiveness": 2,
-            "silence_duration": 1.0,
-            "block_duration": 0.03,
-        },
-    },
-    "stt": {"name": "stt", "args": {"language": "en", "block_duration": 0.03}},
-    "tag": {"name": "tag", "args": {}},
-    "emo": {"name": "emo", "args": {"block_duration": 0.03}},
-    "eag": {"name": "eag", "args": {}},
-    "qag": {"name": "qag", "args": {}},
-    "rag": {
-        "name": "rag",
-        "args": {
-            "language": "en",
-            "tone": "formal",
-            "response_format": "paragraph",
-            "max_length": 1024,
-        },
-    },
-    "tts": {"name": "tts", "args": {}},
-    "gesture": {"name": "gesture", "args": {}},
-}
-
-# Text-only: type a question ("rag.in"), get a streamed answer. No mic, no
-# TTS/gesture — the fastest loop for testing RAG augmentation alone (F9).
-TEXT_ONLY: Preset = {
-    "rag": {
-        "name": "rag",
-        "args": {"language": "en", "tone": "formal", "response_format": "short"},
-    }
-}
-
-# Speech + gesture only, no RAG: type text and pick the "token" event
-# ("rag.out") to drive TTS/Gesture directly (F7/F8) without waiting on an LLM.
-SPEECH_AND_GESTURE: Preset = {
-    "tts": {"name": "tts", "args": {}},
-    "gesture": {"name": "gesture", "args": {}},
-}
-
-NO_TTS_GESTURE: Preset = {
-    "mic": {
-        "name": "mic",
-        "args": {
-            "vad_agressiveness": 2,
-            "silence_duration": 1.0,
-            "block_duration": 0.03,
-        },
-    },
-    "stt": {"name": "stt", "args": {"language": "en", "block_duration": 0.03}},
-    "tag": {"name": "tag", "args": {}},
-    "emo": {"name": "emo", "args": {"block_duration": 0.03}},
-    "eag": {"name": "eag", "args": {}},
-    "qag": {"name": "qag", "args": {}},
-    "rag": {
-        "name": "rag",
-        "args": {
-            "language": "en",
-            "tone": "formal",
-            "response_format": "paragraph",
-            "max_length": 1024,
-        },
-    },
-}
+# Repo root is this file's grandparent (backend/huri_presets.py -> backend/ -> repo root).
+_DEFAULT_PRESETS_DIR = Path(__file__).resolve().parents[1] / "presets"
+PRESETS_DIR = Path(os.environ.get("HURI_PRESETS_DIR", str(_DEFAULT_PRESETS_DIR)))
 
 
-PRESETS: Dict[str, Preset] = {
-    "full_voice": FULL_VOICE,
-    "text_only": TEXT_ONLY,
-    "no_tts_gesture": NO_TTS_GESTURE,
-    "speech_and_gesture": SPEECH_AND_GESTURE,
-}
+def load_presets(presets_dir: Path = PRESETS_DIR) -> Dict[str, Preset]:
+    """Recursively scan ``presets_dir`` for ``*.json`` files (any depth of
+    subfolders) and return ``{relative_path_without_suffix: preset}``, sorted
+    by that key — e.g. ``presets/F5/voice_with_speech.json`` becomes
+    ``F5/voice_with_speech``. Subfolders are just an organizational convenience
+    for whoever maintains the presets; nesting carries no meaning to the
+    backend or frontend beyond the resulting key.
+
+    Called fresh on every ``/presets`` request (see main.py) rather than
+    cached at import time, so new/edited/removed preset files anywhere under
+    the tree are picked up immediately. A preset file that fails to parse
+    (bad JSON, or JSON that isn't an object) is skipped with a logged warning
+    instead of failing the whole endpoint.
+    """
+    presets: Dict[str, Preset] = {}
+
+    if not presets_dir.is_dir():
+        logger.warning("Presets directory %s does not exist; no presets loaded.", presets_dir)
+        return presets
+
+    paths = sorted(
+        presets_dir.rglob("*.json"),
+        key=lambda p: p.relative_to(presets_dir).as_posix(),
+    )
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                preset = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Skipping invalid preset file %s: %s", path, exc)
+            continue
+
+        if not isinstance(preset, dict):
+            logger.warning(
+                "Skipping preset file %s: expected a JSON object mapping tag -> module, got %s.",
+                path,
+                type(preset).__name__,
+            )
+            continue
+
+        key = path.relative_to(presets_dir).with_suffix("").as_posix()
+        presets[key] = preset
+
+    return presets

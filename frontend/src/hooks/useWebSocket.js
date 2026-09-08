@@ -32,8 +32,13 @@ function decodeAudio(b64) {
  * `reconfigure(modules)` (wired up here) tears down the connection and opens
  * a fresh one with a new module combination — this is what the Event
  * Configuration modal's Apply button drives (HuRI/ATP.xlsx F1/F2).
+ *
+ * `enabled` gates whether a connection is attempted at all: HuRI is started
+ * on demand from the Control Panel (see App.jsx / LauncherPanel.jsx) rather
+ * than automatically on page load, so this stays idle — no socket, no
+ * "Connection error" noise — until the caller confirms HuRI is actually up.
  */
-export function useWebSocket(initialModules) {
+export function useWebSocket(initialModules, { enabled = true } = {}) {
   const [modules, setModules] = useState(initialModules);
   const wsRef = useRef(null);
 
@@ -56,6 +61,13 @@ export function useWebSocket(initialModules) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      setConnectionStatus("idle");
+      setStatusMessage("Start HuRI from the Control Panel to connect.");
+      setSessionConfig(null);
+      return;
+    }
+
     setConnectionStatus("connecting");
     setStatusMessage("Connecting to HuRI...");
     setSessionConfig(null);
@@ -117,5 +129,5 @@ export function useWebSocket(initialModules) {
 
     return () => ws.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modules]);
+  }, [modules, enabled]);
 }

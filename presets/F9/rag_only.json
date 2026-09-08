@@ -1,0 +1,6 @@
+{
+  "rag": {
+    "name": "rag",
+    "args": { "language": "en", "tone": "formal", "response_format": "short" }
+  }
+}

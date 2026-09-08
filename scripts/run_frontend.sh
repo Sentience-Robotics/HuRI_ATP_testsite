@@ -11,5 +11,11 @@ if [ ! -d node_modules ]; then
   npm install
 fi
 
-echo "Starting Vite dev server on http://localhost:5173"
+# config.js falls back to http://localhost:8000 when unset (matching a
+# same-origin deploy's port), but run_backend.sh actually serves on 8001 in
+# local dev — HuRI itself owns 8000. Default the override here so a plain
+# run of this script just works; still respect an explicit override.
+export VITE_BACKEND_URL="${VITE_BACKEND_URL:-http://localhost:8001}"
+
+echo "Starting Vite dev server on http://localhost:5173 (VITE_BACKEND_URL=$VITE_BACKEND_URL)"
 npm run dev
