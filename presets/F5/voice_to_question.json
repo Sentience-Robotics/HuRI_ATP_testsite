@@ -1,0 +1,13 @@
+{
+  "mic": {
+    "name": "mic",
+    "args": {
+      "vad_agressiveness": 2,
+      "silence_duration": 1.0,
+      "block_duration": 0.03
+    }
+  },
+  "stt": { "name": "stt", "args": { "language": "en", "block_duration": 0.03 } },
+  "tag": { "name": "tag", "args": {} },
+  "qag": { "name": "qag", "args": { "use_emotion": false } }
+}
