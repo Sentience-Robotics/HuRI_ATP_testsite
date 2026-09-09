@@ -8,6 +8,25 @@ around.
 
 ## Prerequisites
 
+Before anything else:
+
+- **Python 3.12.** Both HuRI's installer and this site's backend build their own venv from it.
+  (HuRI's installer accepts 3.10–3.12 and this backend needs 3.11+; 3.12 is the one version
+  that satisfies both, so that is what we require.)
+- **Git LFS**, installed *before* cloning (`git lfs install`). The avatar's 3D model
+  (`model.fbx`, in `backend/static/` and `frontend/public/`) is stored in LFS — without it you
+  get a small text pointer file instead of the model and the avatar never renders. Already
+  cloned without it? `git lfs install && git lfs pull`.
+- **An NVIDIA GPU is needed for the GPU-heavy modules, TTS and gesture** — and even then only
+  if enough VRAM is free (roughly 4.5 GiB for TTS + 2.2 GiB for gesture, on top of anything
+  else on the card). HuRI's installer plans per module: without that headroom, or on AMD/CPU
+  machines, it simply drops `tts` and `gesture` and you get the text and voice-in pipeline
+  only. Presets that need them are greyed out in the Event Configuration modal; that is
+  expected, not a bug. `HuRI/scripts/install_local.sh --plan-only` shows what your machine
+  will run; see [FULL_INSTALLATION.md](FULL_INSTALLATION.md) for the numbers.
+
+Then:
+
 1. **The HuRI submodule checked out.** HuRI is vendored at `HuRI/` as a git submodule, not a
    plain folder — if it's empty, run:
    ```bash
@@ -32,8 +51,8 @@ around.
    you can skip re-provisioning those two: `./scripts/install_local.sh --yes --skip-services`.
    See `HuRI/scripts/install_local.sh --help` for GPU/CPU profile flags.
 
-3. **Node.js** (for the frontend) and **Python 3.11+** (for this site's own backend — separate
-   from HuRI's venv, see below).
+3. **Node.js** (for the frontend). This site's own backend uses the Python 3.12 from above,
+   in a venv separate from HuRI's (see below).
 
 ## Running it
 

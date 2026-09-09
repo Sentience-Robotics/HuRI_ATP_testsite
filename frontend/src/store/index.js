@@ -40,7 +40,7 @@ const useStore = create((set, get) => ({
 
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   setStatusMessage: (statusMessage) => set({ statusMessage }),
-  setSessionConfig: (sessionConfig) => set({ sessionConfig }),
+  setSessionConfig: (sessionConfig) => set({ sessionConfig, _sentQuestions: [] }),
   setSendTopic: (fn) => set({ sendTopic: fn }),
   setSendAudioFrame: (fn) => set({ sendAudioFrame: fn }),
   setReconfigure: (fn) => set({ reconfigure: fn }),
@@ -66,6 +66,18 @@ const useStore = create((set, get) => ({
   pushMicFrame: (buf) => set((s) => ({ _micBuffer: [...s._micBuffer, buf] })),
 
   // --- turn lifecycle ------------------------------------------------
+  /** Text questions this client published on "question" itself and therefore
+   * expects to see come back on the "question" hook.
+   *
+   * HuRI fans a published event out to *every* subscriber of its topic, and
+   * the web_question hook subscribes to the same "question" topic the text
+   * sender publishes on (see HuRI/src/core/bus.py + web_interface.py). So a
+   * typed message is echoed straight back to us alongside being handed to
+   * RAG — without this, `onQuestion` would open a second turn for a message
+   * `submitText` already rendered, duplicating the user bubble and leaving
+   * the first assistant bubble pending forever. Entries are {id, text}, FIFO. */
+  _sentQuestions: [],
+
   /** Reset the avatar/audio clock for a fresh turn. */
   _resetTurn: () => {
     resetUtterance();
@@ -79,11 +91,16 @@ const useStore = create((set, get) => ({
     if (!trimmed || !get().sendTopic) return;
     get()._resetTurn();
     const now = Date.now();
+    const userId = newId();
     set((s) => ({
+      _sentQuestions:
+        topic === "question" && get().hasModule("qag")
+          ? [...s._sentQuestions, { id: userId, text: trimmed }]
+          : s._sentQuestions,
       messages: [
         ...s.messages,
         {
-          id: newId(),
+          id: userId,
           role: "user",
           text: trimmed,
           topic,
@@ -115,6 +132,21 @@ const useStore = create((set, get) => ({
    * (if the emotion modules are active) linked to its prosody read — closes
    * the user's turn and opens the assistant's (HuRI/ATP.xlsx F9/F10/F11). */
   onQuestion: ({ text, emotion }) => {
+    // Our own typed question coming back (see `_sentQuestions`): the turn is
+    // already on screen, so only fold in anything the echo adds — never a
+    // second bubble pair, and no turn reset, since audio/frames for the reply
+    // may already be streaming in.
+    const echoed = get()._sentQuestions.find((q) => q.text === text);
+    if (echoed) {
+      set((s) => ({
+        _sentQuestions: s._sentQuestions.filter((q) => q.id !== echoed.id),
+        messages: emotion
+          ? s.messages.map((m) => (m.id === echoed.id ? { ...m, emotion } : m))
+          : s.messages,
+      }));
+      return;
+    }
+
     const now = Date.now();
     const micBuffer = get()._micBuffer;
     get()._resetTurn();

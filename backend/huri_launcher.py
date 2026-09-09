@@ -36,6 +36,10 @@ _LOG_MAXLEN = 2000
 _READY_POLL_INTERVAL = 1.0
 _READY_TIMEOUT = 90.0
 _STOP_GRACE_PERIOD = 20.0
+_PROBE_TIMEOUT = 2.0
+# Shorter than the frontend's 2s status poll, so every poll sees a fresh-enough
+# answer while N open tabs still collapse into ~one request at HuRI.
+_PROBE_CACHE_TTL = 1.5
 
 
 class AlreadyRunningError(RuntimeError):
@@ -85,6 +89,9 @@ class HuriLauncher:
         self._reap_task: Optional[asyncio.Task] = None
         self._ready_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        # (checked_at, is_up) for the "is *some* HuRI answering?" probe — see
+        # _external_is_up.
+        self._probe_cache: Optional[Tuple[float, bool]] = None
 
     def _discover_configs(self) -> Dict[str, Path]:
         """Every launchable server-side HuRI config, keyed by what the
@@ -109,13 +116,55 @@ class HuriLauncher:
         :meth:`_discover_configs`)."""
         return sorted(self._discover_configs())
 
-    def status(self) -> Dict[str, Any]:
-        pid = self._process.pid if self._process and self._process.returncode is None else None
+    async def _external_is_up(self, fresh: bool = False) -> bool:
+        """Is *some* HuRI answering at ``probe_url``, whether or not this
+        backend started it?
+
+        HuRI is just as often launched by hand (``serve run config/huri.yaml``
+        in a terminal) as from the control panel, and a backend restart — which
+        includes every ``uvicorn --reload`` — wipes the in-memory bookkeeping of
+        an instance this process *did* start. Reporting "stopped" in either
+        case is worse than cosmetic: the frontend gates its client websocket on
+        that flag (``App.jsx`` passes ``enabled: status === "running"``), so it
+        never opens the socket and the composer sits at "Connecting to HuRI…"
+        against a perfectly healthy instance. Probing the same ``/modules``
+        route :meth:`_wait_ready` uses ties the reported status to reality
+        rather than to who spawned the process.
+        """
+        now = time.time()
+        cached = self._probe_cache
+        if not fresh and cached is not None and now - cached[0] < _PROBE_CACHE_TTL:
+            return cached[1]
+        try:
+            async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
+                resp = await client.get(f"{self.probe_url}/modules")
+                up = resp.is_success
+        except Exception:
+            up = False
+        self._probe_cache = (time.time(), up)
+        return up
+
+    async def status(self) -> Dict[str, Any]:
+        owned = self._process is not None and self._process.returncode is None
+        pid = self._process.pid if owned else None
+        status = self._status
+        external = False
+        # Only fall back to the probe when we have no live process of our own:
+        # our own bookkeeping distinguishes starting/stopping/crashed, which a
+        # single HTTP probe cannot.
+        if status not in ("starting", "running", "stopping") and await self._external_is_up():
+            status = "running"
+            external = True
         return {
-            "status": self._status,
-            "config": self._config_name,
+            "status": status,
+            # True when HuRI is up but this backend doesn't own the process, so
+            # the UI can offer to use it without offering a Stop that can't work.
+            "external": external,
+            # These describe *our* subprocess; they say nothing about an
+            # instance someone else started.
+            "config": None if external else self._config_name,
             "pid": pid,
-            "started_at": self._started_at,
+            "started_at": None if external else self._started_at,
             "uptime_seconds": (time.time() - self._started_at) if self._started_at and pid else None,
             "dashboard_url": self.dashboard_url,
             "exit_code": self._exit_code,
@@ -131,6 +180,16 @@ class HuriLauncher:
             if self._status in ("starting", "running", "stopping"):
                 raise AlreadyRunningError(
                     f"HuRI is already {self._status} (config={self._config_name})."
+                )
+            # HuRI binds fixed local ports, so a second `serve run` against an
+            # instance someone started by hand would just collide. Probe fresh:
+            # a cached answer from before the operator brought one up would let
+            # exactly the launch this guards against through.
+            if await self._external_is_up(fresh=True):
+                raise AlreadyRunningError(
+                    f"A HuRI instance is already answering at {self.probe_url}, "
+                    "started outside this backend — connect to it as is, or stop "
+                    "it where it was started."
                 )
             configs = self._discover_configs()
             if config_name not in configs:
@@ -171,6 +230,11 @@ class HuriLauncher:
     async def stop(self) -> None:
         async with self._lock:
             if self._status not in ("starting", "running"):
+                if await self._external_is_up():
+                    raise NotRunningError(
+                        f"HuRI is running at {self.probe_url}, but it wasn't started "
+                        "by this backend — stop it where you started it."
+                    )
                 raise NotRunningError(f"HuRI is not running (status={self._status}).")
             self._status = "stopping"
             proc = self._process
@@ -202,6 +266,11 @@ class HuriLauncher:
             await asyncio.wait_for(cleanup.wait(), timeout=15)
         except (FileNotFoundError, asyncio.TimeoutError) as exc:
             logger.warning("`%s stop` cleanup skipped: %s", self.ray_bin, exc)
+
+        # The instance we just tore down may still be inside a cached "up"
+        # answer; drop it so the next status() re-probes instead of reporting
+        # the corpse as an external instance.
+        self._probe_cache = None
 
     async def _read_logs(self) -> None:
         assert self._process is not None and self._process.stdout is not None

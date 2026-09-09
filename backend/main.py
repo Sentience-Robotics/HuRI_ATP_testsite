@@ -330,7 +330,7 @@ async def launcher_configs(_sub: str = Depends(_require_auth)) -> Dict[str, Any]
 
 @app.get("/launcher/huri/status")
 async def launcher_status(_sub: str = Depends(_require_auth)) -> Dict[str, Any]:
-    return _launcher.status()
+    return await _launcher.status()
 
 
 @app.get("/launcher/huri/logs")
@@ -350,7 +350,7 @@ async def launcher_start(
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return _launcher.status()
+    return await _launcher.status()
 
 
 @app.post("/launcher/huri/stop")
@@ -359,7 +359,7 @@ async def launcher_stop(_sub: str = Depends(_require_auth)) -> Dict[str, Any]:
         await _launcher.stop()
     except NotRunningError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return _launcher.status()
+    return await _launcher.status()
 
 
 @app.get("/huri-modules")

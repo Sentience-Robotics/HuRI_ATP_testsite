@@ -348,6 +348,7 @@ ai_models/*
 
 *.mp3
 *.wav
+!assets/voice.wav
 *.npz
 *.old
 

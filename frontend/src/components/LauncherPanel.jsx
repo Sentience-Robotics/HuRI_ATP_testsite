@@ -83,6 +83,11 @@ export default function LauncherPanel({ onClose }) {
 
   const isBusyStatus = status?.status === "starting" || status?.status === "stopping";
   const isRunning = status?.status === "running" || isBusyStatus;
+  // HuRI answering on its port without this backend owning the process — a
+  // `serve run` in a terminal, or an instance that outlived a backend restart
+  // (see huri_launcher.py's _external_is_up). Clients work against it exactly
+  // as they would against one started here; only the Stop button can't.
+  const isExternal = Boolean(status?.external);
 
   const start = async () => {
     if (!selectedConfig) return;
@@ -158,14 +163,16 @@ export default function LauncherPanel({ onClose }) {
               Start
             </button>
           ) : (
-            <button
-              type="button"
-              className="modal-apply"
-              onClick={stop}
-              disabled={busy || isBusyStatus}
-            >
-              Stop
-            </button>
+            !isExternal && (
+              <button
+                type="button"
+                className="modal-apply"
+                onClick={stop}
+                disabled={busy || isBusyStatus}
+              >
+                Stop
+              </button>
+            )
           )}
         </div>
 
@@ -173,6 +180,7 @@ export default function LauncherPanel({ onClose }) {
           <div className="launcher-status-row">
             <span className={`status-pill launcher-status-${status.status}`}>
               {STATUS_LABELS[status.status] ?? status.status}
+              {isExternal ? " (external)" : ""}
             </span>
             {status.config && <span className="modal-hint">config: {status.config}</span>}
             {status.pid && <span className="modal-hint">pid: {status.pid}</span>}
@@ -185,6 +193,12 @@ export default function LauncherPanel({ onClose }) {
             >
               Open Ray dashboard ↗
             </a>
+          </div>
+        )}
+        {isExternal && (
+          <div className="modal-hint">
+            HuRI is up but wasn't started from this panel, so it can't be stopped here
+            — stop it wherever you started it. Clients connect to it all the same.
           </div>
         )}
         {status?.last_error && (
