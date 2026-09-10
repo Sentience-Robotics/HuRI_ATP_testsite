@@ -81,8 +81,10 @@ Both scripts auto-detect the HuRI checkout (the submodule at `HuRI/`, falling ba
 `serve`/`ray` binaries at that checkout's own venv. Override with `HURI_REPO_PATH` if yours lives
 somewhere else.
 
-By default `REQUIRE_AUTH=0` (`run_all.sh` sets this) — no Authelia needed, every visitor is
-treated as one open `anonymous` session. See **Auth** below to turn on the real login flow.
+By default `REQUIRE_AUTH=0` (`run_all.sh` sets this) — no Authelia needed, every visitor shares
+one open session whose RAG identity is a UUID generated once and saved to `.huri_user_id`, so the
+assistant's memory survives a backend restart. See **Auth** below to turn on the real login flow,
+and **RAG identity** for how that UUID is resolved.
 
 ## Configuring HuRI (the Control Panel)
 
@@ -128,12 +130,35 @@ Three modes, picked by what's set in the backend's environment (see `backend/mai
 
 | Mode | Set | Behaviour |
 |---|---|---|
-| Open (local dev) | `REQUIRE_AUTH=0` | No login screen; every session is `user_id=anonymous`. |
+| Open (local dev) | `REQUIRE_AUTH=0` | No login screen; every session shares one `user_id` — the persisted UUID from `.huri_user_id` (see **RAG identity**). |
 | Authelia (OIDC) | `REQUIRE_AUTH=1`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SESSION_SECRET` | Real login via `/auth/login`; the OIDC `sub` becomes the HuRI `user_id` (scopes RAG memory per user). |
 | Magic link (demo) | `MAGIC_LINK_SECRET` | A signed token redeemed at `/auth/magic` drops the same session an OIDC login would, without running Authelia. The minting tool `main.py` refers to (`tools/make_magic_qr.py`) doesn't exist yet — see **Known gaps**. |
 
 `SESSION_SECRET` is required whenever `REQUIRE_AUTH=1` — the backend refuses to start without one
 rather than fall back to a public default, since it's what makes the session cookie unforgeable.
+
+## RAG identity (what makes HuRI remember you)
+
+HuRI scopes every RAG write and read to a `_user_id` (HuRI's `src/core/module.py`,
+`src/modules/rag/*`), so the `user_id` the backend hands `run_browser_session` *is* what makes the
+assistant remember someone across sessions. `resolve_user_id()` in `backend/main.py` picks it, in
+order:
+
+1. **the authenticated OIDC `sub`** — the real identity, one RAG partition per user;
+2. **`HURI_USER_ID`** — an explicit override, to pin a session to a known partition (e.g. one you
+   already ingested documents into);
+3. **a UUID generated once and persisted** to `HURI_USER_ID_FILE` (default `<repo root>/.huri_user_id`,
+   written `0600`, gitignored) — so an unauthenticated backend keeps the same memory across restarts.
+
+(3) is a single shared identity for everyone who reaches the site, so it's a dev/demo stopgap, not
+multi-user — use Authelia for that. `GET /auth/me` reports the resolved `user_id`, which is the
+quick way to tell "HuRI forgot me" apart from "I'm talking to a different partition".
+
+For a containerised deploy, point `HURI_USER_ID_FILE` at a mounted volume — otherwise the UUID is
+regenerated on every image rebuild. To share one identity with HuRI's CLI client
+(`src/client.py`), point it at HuRI's own `~/.config/huri/_user_id`. Note HuRI's RAG ingestion CLI
+(`src/modules/rag/ingestion.py`) reads `~/.huri_user_id` instead, so line the two up — or pass
+`--user-id` when ingesting — if documents you ingest should land in the partition this site reads.
 
 ## Key environment variables
 
@@ -145,6 +170,8 @@ rather than fall back to a public default, since it's what makes the session coo
 | `HURI_PRESETS_DIR` | `<repo root>/presets` | Where `/presets` and the Control Panel's config list are scanned from |
 | `VITE_BACKEND_URL` | `http://localhost:8001` | Backend origin the frontend talks to (build-time env var) |
 | `REQUIRE_AUTH` | `0` in `run_all.sh`, `1` otherwise | See **Auth** above |
+| `HURI_USER_ID` | unset | Pins the HuRI `user_id` / RAG partition explicitly; see **RAG identity** |
+| `HURI_USER_ID_FILE` | `<repo root>/.huri_user_id` | Where the fallback persisted UUID is stored; see **RAG identity** |
 
 ## Known gaps
 

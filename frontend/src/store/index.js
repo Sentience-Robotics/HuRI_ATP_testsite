@@ -40,7 +40,9 @@ const useStore = create((set, get) => ({
 
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   setStatusMessage: (statusMessage) => set({ statusMessage }),
-  setSessionConfig: (sessionConfig) => set({ sessionConfig, _sentQuestions: [] }),
+  setSessionConfig: (sessionConfig) =>
+    // A new session can't owe us a reply — never start one mic-gated.
+    set({ sessionConfig, _sentQuestions: [], assistantSpeaking: false }),
   setSendTopic: (fn) => set({ sendTopic: fn }),
   setSendAudioFrame: (fn) => set({ sendAudioFrame: fn }),
   setReconfigure: (fn) => set({ reconfigure: fn }),
@@ -60,8 +62,18 @@ const useStore = create((set, get) => ({
 
   // --- mic -----------------------------------------------------------
   recording: false,
-  micArmed: false, // half-duplex: reopen the mic once the current reply finishes
   _micBuffer: [], // Int16 ArrayBuffers captured during the current utterance
+
+  /** Half-duplex gate: true from the moment a reply starts until it is done.
+   *
+   * HuRI's VAD closes a turn on silence (HuRI/src/modules/speech_to_text/
+   * microphone_vad.py), so anything audible we keep streaming counts as the
+   * user still talking — including the avatar's own voice coming back through
+   * the speakers. Left ungated, the first reply retriggers the VAD, the turn
+   * never ends, and the mic appears to stop working after one exchange.
+   * Composer stops sending frames while this is set (and until the audio
+   * already scheduled on the pts clock has actually finished playing). */
+  assistantSpeaking: false,
 
   pushMicFrame: (buf) => set((s) => ({ _micBuffer: [...s._micBuffer, buf] })),
 
@@ -119,14 +131,21 @@ const useStore = create((set, get) => ({
       ],
     }));
     get().sendTopic(topic, trimmed);
+    if (get()._replyIsSpoken()) set({ assistantSpeaking: true });
   },
+
+  /** Whether this session actually produces a reply whose end we can wait for.
+   * A transcription-only preset (mic+stt+tag+qag — ATP F5/F6) sends neither a
+   * token nor an audio end marker, so gating the mic on it would hold the mic
+   * shut forever. */
+  _replyIsSpoken: () => get().hasModule("rag") || get().hasModule("tts"),
 
   /** Mic toggle (HuRI/ATP.xlsx F5/F6). */
   beginListening: () => {
     get()._resetTurn();
-    set({ recording: true, micArmed: false, _micBuffer: [] });
+    set({ recording: true, assistantSpeaking: false, _micBuffer: [] });
   },
-  stopListening: () => set({ recording: false, micArmed: false }),
+  stopListening: () => set({ recording: false, assistantSpeaking: false }),
 
   /** "question" hook message: a voice utterance was fully transcribed and
    * (if the emotion modules are active) linked to its prosody read — closes
@@ -155,6 +174,8 @@ const useStore = create((set, get) => ({
       : null;
     set((s) => ({
       _micBuffer: [],
+      // Close the mic for the reply we just triggered (see `assistantSpeaking`).
+      assistantSpeaking: get()._replyIsSpoken(),
       messages: [
         ...s.messages,
         {
@@ -231,7 +252,9 @@ const useStore = create((set, get) => ({
       };
       return { messages };
     });
-    if (get().recording) set({ micArmed: true }); // reopen the mic once idle
+    // Reply finished: reopen the mic. Composer still holds it until the audio
+    // already queued ahead on the pts clock has drained.
+    set({ assistantSpeaking: false });
   },
 
   // --- chat ------------------------------------------------------------

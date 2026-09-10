@@ -100,7 +100,17 @@ export function useWebSocket(initialModules, { enabled = true } = {}) {
           onToken(msg);
           break;
         case "audio":
-          onAudio({ ...msg, data: decodeAudio(msg.data) });
+          // The wire field is snake_case (`sample_rate`, straight from HuRI's
+          // WebAudioHook — backend/main.py passes "audio" messages through
+          // untouched). Rename it here: scheduleChunk feeds it to
+          // createBuffer(), which throws on a non-finite rate, and that
+          // exception would take down this whole handler.
+          onAudio({
+            data: decodeAudio(msg.data),
+            sampleRate: msg.sample_rate,
+            pts: msg.pts,
+            end: msg.end,
+          });
           break;
         case "segment":
           // Gesture frames, already converted to this frontend's rig format

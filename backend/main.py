@@ -65,6 +65,7 @@ _HURI_REPO_PATH = os.environ.get(
 if _HURI_REPO_PATH not in sys.path:
     sys.path.insert(0, _HURI_REPO_PATH)
 
+from src.core.user_config import get_or_create_and_save_user_id  # noqa: E402
 from src.interfaces.web_interface import run_browser_session  # noqa: E402
 
 from huri_launcher import AlreadyRunningError, HuriLauncher, NotRunningError, UnknownConfigError  # noqa: E402
@@ -79,7 +80,8 @@ logger = logging.getLogger(__name__)
 # stable opaque `sub` is stored in the signed session and pinned as the HuRI
 # `user_id`, so RAG retrieval is scoped to the real authenticated identity
 # instead of a throwaway UUID. Set REQUIRE_AUTH=0 to fall back to the local
-# persisted-UUID behavior for development without Authelia.
+# persisted-UUID behavior for development without Authelia (see
+# `resolve_user_id` below).
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").rstrip("/")
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "huri-website")
 OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
@@ -117,6 +119,54 @@ COOKIE_SECURE = not _is_falsey(
     os.environ.get("COOKIE_SECURE", "1" if REQUIRE_AUTH else "0")
 )
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax").lower()
+
+# --- RAG identity (the `user_id` / `_user_id` partition key) -----------------
+# HuRI scopes every RAG write and read to a `_user_id` (see HuRI's
+# src/core/module.py and src/modules/rag/*), so the `user_id` we hand
+# `run_browser_session` IS what makes the assistant remember a given person
+# across sessions. It must therefore be *stable*, never per-connection.
+#
+# Precedence:
+#   1. the authenticated OIDC `sub` — the real identity, one partition per user;
+#   2. HURI_USER_ID — an explicit override (pin a session to a known partition,
+#      e.g. one you ingested documents into);
+#   3. a UUID generated once and persisted to disk, so an unauthenticated
+#      backend still keeps the same memory across restarts.
+#
+# (3) is a single shared identity for everyone who reaches the site, which is
+# why it only applies with REQUIRE_AUTH=0 — it is a development/demo stopgap,
+# not multi-user. Without it the fallback was the literal string "anonymous",
+# which works but gives every deployment the same partition key.
+#
+# The file defaults to <repo root>/.huri_user_id (already gitignored). Point
+# HURI_USER_ID_FILE at a mounted volume for a containerised deploy, or at
+# HuRI's own ~/.config/huri/_user_id to share one identity with HuRI's CLI
+# client (src/client.py). Note HuRI's RAG ingestion CLI
+# (src/modules/rag/ingestion.py) reads ~/.huri_user_id instead, so line the two
+# up — or pass `--user-id` when ingesting — if you want documents you ingest to
+# land in the partition this site reads.
+USER_ID_FILE = Path(
+    os.environ.get("HURI_USER_ID_FILE", str(_REPO_ROOT / ".huri_user_id"))
+)
+
+
+def resolve_user_id(sub: str | None = None) -> str:
+    """Return the stable HuRI `user_id` / RAG partition key for this session."""
+    if sub:
+        return sub
+    explicit = os.environ.get("HURI_USER_ID", "").strip()
+    if explicit:
+        return explicit
+    # get_or_create_and_save_user_id writes the file when it is missing, so make
+    # sure the directory exists first (HURI_USER_ID_FILE may name a fresh volume
+    # path); the repo-root default always exists.
+    USER_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existed = USER_ID_FILE.exists()
+    uid = get_or_create_and_save_user_id(str(USER_ID_FILE))
+    if not existed:
+        logger.info("Generated new persistent user_id %s (saved to %s)", uid, USER_ID_FILE)
+    return uid
+
 
 # --- Magic-link auto-login (passwordless QR sign-in for demos) --------------
 # A signed token — baked into a QR code by tools/make_magic_qr.py — is redeemed
@@ -274,6 +324,10 @@ async def auth_me(request: Request):
         "sub": sub,
         "email": request.session.get("email"),
         "name": request.session.get("name"),
+        # Which RAG partition this visitor's session will read/write — the OIDC
+        # `sub` when signed in, otherwise the persisted fallback UUID. Handy for
+        # telling "HuRI forgot me" apart from "I'm in a different partition".
+        "user_id": resolve_user_id(sub) if not (REQUIRE_AUTH and not sub) else None,
     }
 
 
@@ -422,7 +476,7 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     await ws.accept()
-    user_id = sub or "anonymous"
+    user_id = resolve_user_id(sub)
     logger.info("Frontend connected (user_id=%s)", user_id)
 
     try:

@@ -4,6 +4,53 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# --host[=IP] — mirrors `vite --host` in frontend/package.json: the backend
+# already binds 0.0.0.0 below, so it's reachable from your LAN regardless.
+# What --host actually fixes is CORS: allow_credentials=True means the
+# CORSMiddleware can't wildcard origins, so FRONTEND_URL must exactly match
+# wherever the SPA is actually loaded from (e.g. a phone hitting
+# http://192.168.x.x:5173, not http://localhost:5173). Bare --host
+# auto-detects this machine's LAN IP via `hostname -I`.
+HOST_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host=*)
+      HOST_ARG="${1#--host=}"
+      shift
+      ;;
+    --host)
+      if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+        HOST_ARG="$2"
+        shift 2
+      else
+        HOST_ARG="auto"
+        shift
+      fi
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -n "$HOST_ARG" ]; then
+  if [ "$HOST_ARG" = "auto" ]; then
+    HOST_ARG="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [ -z "$HOST_ARG" ]; then
+      echo "Could not auto-detect a LAN IP; pass one explicitly: --host <ip>" >&2
+      exit 1
+    fi
+  fi
+  export FRONTEND_URL="${FRONTEND_URL:-http://$HOST_ARG:5173}"
+  echo "LAN mode: allowing frontend origin $FRONTEND_URL (run_frontend.sh --host $HOST_ARG on the same machine)"
+fi
+
+# Local dev by default: no Authelia, no signed-in session required (same
+# default as run_all.sh). Export REQUIRE_AUTH=1 yourself (plus OIDC_ISSUER/etc,
+# see backend/main.py) to exercise the real login flow instead.
+export REQUIRE_AUTH="${REQUIRE_AUTH:-0}"
+
 cd "$PROJECT_DIR/backend"
 
 VENV="$PROJECT_DIR/.venv"

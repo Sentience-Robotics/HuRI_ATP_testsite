@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import useStore from "../store/index.js";
-import { ensureContext } from "../audio/playback.js";
+import { ensureContext, getRemaining } from "../audio/playback.js";
 import { startMic, stopMic } from "../audio/microphone.js";
 
 const TOPIC_LABELS = {
@@ -49,6 +49,13 @@ export default function Composer({ onOpenSettings }) {
 
   const submit = () => {
     if (isAudioTopic || !text.trim() || !connected) return;
+    // Open/unlock the output context here, inside the send gesture. TTS chunks
+    // are scheduled from a WebSocket callback, and a context first created
+    // there has no user activation behind it — it starts suspended and
+    // resume() is a no-op, so the reply plays into silence. Typing is the only
+    // gesture a text-only session ever produces (the mic path does the same in
+    // toggleMic).
+    ensureContext();
     submitText(activeTopic, text);
     setText("");
   };
@@ -71,6 +78,16 @@ export default function Composer({ onOpenSettings }) {
     beginListening();
     try {
       await startMic((buf) => {
+        // Half-duplex: never stream the avatar's own voice back into HuRI's
+        // VAD — it reads as the user still talking, so the turn never ends.
+        // `assistantSpeaking` covers the reply from the moment it starts;
+        // getRemaining() covers its tail, since TTS chunks are scheduled ahead
+        // on the pts clock and the "audio" end marker lands well before the
+        // sound actually stops (see audio/playback.js).
+        if (useStore.getState().assistantSpeaking || getRemaining() > 0) {
+          setLevel(0);
+          return;
+        }
         setLevel(micLevelFromFrame(buf));
         pushMicFrame(buf);
         sendAudioFrame?.(buf);
