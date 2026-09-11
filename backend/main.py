@@ -18,11 +18,16 @@ Frontend <-> backend protocol on ``/ws`` (unchanged from before this refactor):
   3. inbound: binary frames are mic PCM (always ``audio.in``); JSON frames are
      ``{"topic": "question"|"token", "text": ...}`` — the frontend's event
      dropdown picks which one a given typed message targets ("rag.in" vs
-     "rag.out" in HuRI/ATP.xlsx's terms);
-  4. outbound: ``{"type": "token"|"audio"|"motion"|"question", ...}``, where a
-     ``"motion"`` message's raw pose/expression/translation arrays have
-     already been converted into this frontend's ``{t, rotations,
-     blendshapes, positions}`` frame format by ``pipeline.py``.
+     "rag.out" in HuRI/ATP.xlsx's terms). An EMPTY binary frame (or, spelled
+     out, ``{"topic": "audio.in", "end": true}``) is sent when the mic button
+     is switched off, so HuRI ends the utterance right away instead of
+     waiting for a silence it will never hear;
+  4. outbound: ``{"type": "token"|"audio"|"motion"|"question"|"transcript",
+     ...}``, where a ``"motion"`` message's raw pose/expression/translation
+     arrays have already been converted into this frontend's ``{t, rotations,
+     blendshapes, positions}`` frame format by ``pipeline.py``; everything
+     else passes through untouched (``"transcript"`` is STT's live partial /
+     final text, shown above the composer).
 """
 
 import logging

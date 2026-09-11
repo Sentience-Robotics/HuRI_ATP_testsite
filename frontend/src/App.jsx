@@ -6,6 +6,7 @@ import EventConfigModal from "./components/EventConfigModal.jsx";
 import LauncherPanel from "./components/LauncherPanel.jsx";
 import UserIdPill from "./components/UserIdPill.jsx";
 import { useWebSocket } from "./hooks/useWebSocket.js";
+import { useAudioLifecycle } from "./hooks/useAudioLifecycle.js";
 import { useHuriStatus } from "./hooks/useHuriStatus.js";
 import useStore from "./store/index.js";
 import { BACKEND_URL } from "./config.js";
@@ -101,6 +102,7 @@ function TestingApp({ user }) {
   // rather than dropping to rag-only and making the tester pick again.
   const [initialModules] = useState(() => loadSessionModules() || DEFAULT_MODULES);
   useWebSocket(initialModules, { enabled: huriRunning });
+  useAudioLifecycle();
 
   const connectionStatus = useStore((s) => s.connectionStatus);
   const statusMessage = useStore((s) => s.statusMessage);

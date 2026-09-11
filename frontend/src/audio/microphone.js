@@ -13,12 +13,20 @@
  * Implementation note: we use a ScriptProcessorNode (deprecated but single-file
  * and dependency-free, fine for this demo) and resample to 16 kHz ourselves when
  * the browser won't give us a 16 kHz AudioContext.
+ *
+ * Lifecycle: on phones the capture can stop underneath us without any error —
+ * iOS revokes the track when another app takes audio focus (call, Siri, a
+ * video), and suspends the AudioContext on screen lock or app switch. Those
+ * are reported through the `onState` callback so the UI can say so instead of
+ * showing a red button that streams nothing; resumeMic() is the hook for the
+ * page coming back to the foreground.
  */
 
 const TARGET_RATE = 16000;
 const FRAME_SAMPLES = 480; // 30 ms @ 16 kHz
 
 let stream = null;
+let track = null;
 let ctx = null;
 let source = null;
 let processor = null;
@@ -64,17 +72,39 @@ function pushInt16(samples, onFrame) {
  * Start capturing. `onFrame` receives an ArrayBuffer of 480 int16 samples
  * (960 bytes) per call. Returns once the mic is live; throws if permission is
  * denied. Call stopMic() to release the device.
+ *
+ * `onState(state)` reports what happens to the capture afterwards:
+ *   "ended"     the track was taken away (permission revoked, another app took
+ *               the mic) — capture is over, call stopMic() and tell the user;
+ *   "muted"     the OS paused delivery (call, interruption) — frames stop for
+ *               a while, usually followed by "unmuted";
+ *   "unmuted"   delivery resumed;
+ *   "suspended" the AudioContext stopped (screen lock, app switch); a resume
+ *               is attempted here and again from resumeMic().
  */
-export async function startMic(onFrame) {
+export async function startMic(onFrame, { onState } = {}) {
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
   });
+  track = stream.getAudioTracks()[0] || null;
+  if (track) {
+    track.onended = () => onState?.("ended");
+    track.onmute = () => onState?.("muted");
+    track.onunmute = () => onState?.("unmuted");
+  }
 
   const AC = window.AudioContext || window.webkitAudioContext;
   // Most browsers honor a 16 kHz request; if not, resampleTo16k() covers us.
   ctx = new AC({ sampleRate: TARGET_RATE });
   if (ctx.state === "suspended") await ctx.resume();
   inputRate = ctx.sampleRate;
+  ctx.onstatechange = () => {
+    if (!ctx) return;
+    if (ctx.state !== "running" && ctx.state !== "closed") {
+      onState?.("suspended");
+      ctx.resume().catch(() => {});
+    }
+  };
 
   source = ctx.createMediaStreamSource(stream);
   processor = ctx.createScriptProcessor(2048, 1, 1);
@@ -96,6 +126,18 @@ export async function startMic(onFrame) {
   processor.connect(ctx.destination);
 }
 
+/** Wake a capture context that the OS suspended (page back in foreground). */
+export function resumeMic() {
+  if (ctx && ctx.state !== "running" && ctx.state !== "closed") {
+    ctx.resume().catch(() => {});
+  }
+}
+
+/** Whether a capture is currently set up (regardless of its health). */
+export function micActive() {
+  return stream !== null;
+}
+
 /** Stop capturing and release the microphone. */
 export function stopMic() {
   if (processor) {
@@ -107,11 +149,18 @@ export function stopMic() {
     source.disconnect();
     source = null;
   }
+  if (track) {
+    track.onended = null;
+    track.onmute = null;
+    track.onunmute = null;
+    track = null;
+  }
   if (stream) {
-    for (const track of stream.getTracks()) track.stop();
+    for (const t of stream.getTracks()) t.stop();
     stream = null;
   }
   if (ctx) {
+    ctx.onstatechange = null;
     ctx.close();
     ctx = null;
   }

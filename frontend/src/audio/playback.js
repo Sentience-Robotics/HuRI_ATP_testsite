@@ -131,8 +131,19 @@ export function getElapsed() {
 
 /** Seconds of audio still scheduled to play, from now. */
 export function getRemaining() {
-  if (!ctx || startTime === null) return 0;
+  // A suspended/interrupted context (iOS screen lock, incoming call, app
+  // switch) has a frozen clock, so `endsAt - currentTime` would stay positive
+  // forever — and Composer gates the mic on this. Nothing plays while the
+  // context isn't running, so there is nothing left to wait for.
+  if (!ctx || ctx.state !== "running" || startTime === null) return 0;
   return Math.max(0, endsAt - ctx.currentTime);
+}
+
+/** Resume an existing output context after the page comes back (visibility,
+ * pageshow). Unlike ensureContext() this never creates one: outside a user
+ * gesture a fresh context would just sit suspended. */
+export function resumePlayback() {
+  if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
 }
 
 /**

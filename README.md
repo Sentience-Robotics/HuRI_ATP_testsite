@@ -179,6 +179,14 @@ regenerated on every image rebuild. To share one identity with HuRI's CLI client
 (`src/modules/rag/ingestion.py`) reads `~/.huri_user_id` instead, so line the two up — or pass
 `--user-id` when ingesting — if documents you ingest should land in the partition this site reads.
 
+The easy way to feed documents to the site is `./scripts/ingest_doc.sh notes.md`: it runs that
+same ingestion CLI against the Qdrant/embedding endpoints HuRI is currently installed with (read
+from `<HuRI checkout>/.huri-local/plan.env`, so the vectors match what the running `RAGHandle`
+queries with) and publishes under the reserved shared id `__shared__` by default, which every
+device's partition can retrieve. `--user-id <id>` targets one partition, `--replace` re-publishes a
+file without piling up duplicate chunks, `--list` shows what's there. See the header of the script
+for the full resolution rules and env overrides.
+
 ## Key environment variables
 
 | Variable | Default | Purpose |

@@ -670,3 +670,32 @@ button:disabled {
     min-width: 0;
   }
 }
+
+/* --- mic status line (MicStatusLine.jsx) --------------------------------- */
+
+.mic-status {
+  flex-shrink: 0;
+  padding: 4px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mic-status.live {
+  color: var(--text);
+}
+
+.mic-status.warn {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .mic-status {
+    padding: 4px 12px;
+    white-space: normal;
+  }
+}

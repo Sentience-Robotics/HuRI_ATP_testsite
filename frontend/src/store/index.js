@@ -13,6 +13,20 @@ let nextId =
   1 + RESTORED_MESSAGES.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0);
 const newId = () => `m${nextId++}`;
 
+// How long a reply may go without any activity (token, audio chunk, end
+// marker) before the half-duplex gate reopens the mic on its own. The gate is
+// otherwise only released by a server "end" marker; if that never arrives
+// (RAG/TTS failure, dropped frame, HuRI link died) the mic would stay shut for
+// the rest of the session while the button still shows "recording".
+const GATE_WATCHDOG_MS = 45_000;
+
+// How long to wait, after closing the mic, for HuRI's final transcript of
+// what was said (see `stopListening`). STT's whole-utterance pass gives up
+// after 20 s and falls back to its partials (`final_timeout` in HuRI/src/
+// modules/speech_to_text/speech_to_text.py), so nothing arriving by then
+// means the pipeline or the link is gone — stop saying "finishing".
+const FINISH_WATCHDOG_MS = 30_000;
+
 /** Concatenate Int16 mic frames captured during a recording into one Float32
  * buffer, for attaching to the resulting user message (waveform + replay). */
 function int16FramesToFloat32(frames) {
@@ -45,15 +59,21 @@ const useStore = create((set, get) => ({
   sessionConfig: null, // {modules, senders, hooks}, echoed back by the backend
   sendTopic: null, // (topic, text) => void, installed by useWebSocket
   sendAudioFrame: null, // (ArrayBuffer) => void
+  sendAudioEnd: null, // () => boolean — mic-closed marker; false if not connected
   reconfigure: null, // (modules) => void — re-handshakes with a new module set
 
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   setStatusMessage: (statusMessage) => set({ statusMessage }),
-  setSessionConfig: (sessionConfig) =>
-    // A new session can't owe us a reply — never start one mic-gated.
-    set({ sessionConfig, _sentQuestions: [], assistantSpeaking: false }),
+  setSessionConfig: (sessionConfig) => {
+    // A new session can't owe us a reply — never start one mic-gated, nor
+    // waiting for a final transcript the old session was going to send.
+    get()._releaseGate();
+    get()._stopFinishing();
+    set({ sessionConfig, _sentQuestions: [], liveTranscript: "", lastFinalTranscript: "" });
+  },
   setSendTopic: (fn) => set({ sendTopic: fn }),
   setSendAudioFrame: (fn) => set({ sendAudioFrame: fn }),
+  setSendAudioEnd: (fn) => set({ sendAudioEnd: fn }),
   setReconfigure: (fn) => set({ reconfigure: fn }),
 
   /** Whether a module is part of the currently active session — drives
@@ -83,6 +103,68 @@ const useStore = create((set, get) => ({
    * Composer stops sending frames while this is set (and until the audio
    * already scheduled on the pts clock has actually finished playing). */
   assistantSpeaking: false,
+  _gateTimer: null,
+
+  /** Close the mic for a reply, with a watchdog (see GATE_WATCHDOG_MS). */
+  _armGate: () => {
+    const prev = get()._gateTimer;
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      if (!get().assistantSpeaking) return;
+      console.warn(
+        `assistantSpeaking watchdog: no reply activity for ${GATE_WATCHDOG_MS / 1000}s — reopening the mic`,
+      );
+      set({ assistantSpeaking: false, _gateTimer: null });
+    }, GATE_WATCHDOG_MS);
+    set({ assistantSpeaking: true, _gateTimer: timer });
+  },
+  /** Reply activity: push the watchdog back while it's still streaming. */
+  _touchGate: () => {
+    if (get().assistantSpeaking) get()._armGate();
+  },
+  _releaseGate: () => {
+    const prev = get()._gateTimer;
+    if (prev) clearTimeout(prev);
+    if (get().assistantSpeaking || prev) set({ assistantSpeaking: false, _gateTimer: null });
+  },
+
+  /** What Composer decided for the latest mic frame: true while frames are
+   * being dropped because a reply is (still) playing. Kept here so the UI can
+   * show "muted" instead of a red button with flat level bars. */
+  micGated: false,
+  setMicGated: (micGated) => {
+    if (get().micGated !== micGated) set({ micGated });
+  },
+  /** Something the OS did to the capture (track ended / muted), for display. */
+  micNotice: "",
+  setMicNotice: (micNotice) => set({ micNotice }),
+
+  /** Live feedback from HuRI's STT ("transcript" hook): what it is hearing
+   * right now (sliding-window partial, end=false) and the last whole-utterance
+   * text it settled on (end=true). The final also arrives as the "question"
+   * once QAG links its emotion — this is the debugging view, not the chat. */
+  liveTranscript: "",
+  lastFinalTranscript: "",
+  onTranscript: ({ text, end }) => {
+    if (end) {
+      get()._stopFinishing();
+      set({ lastFinalTranscript: text, liveTranscript: "" });
+    } else {
+      set({ liveTranscript: text });
+    }
+  },
+
+  /** True from the mic being closed until HuRI's final transcript for what
+   * was said lands (see `stopListening`). While set, `liveTranscript` is the
+   * last partial of the utterance being finished; once the watchdog gives
+   * up it stays on screen as the only record of what was heard. */
+  finishing: false,
+  _finishTimer: null,
+  _stopFinishing: () => {
+    const prev = get()._finishTimer;
+    if (prev) clearTimeout(prev);
+    if (get().finishing || prev) set({ finishing: false, _finishTimer: null });
+  },
 
   pushMicFrame: (buf) => set((s) => ({ _micBuffer: [...s._micBuffer, buf] })),
 
@@ -140,7 +222,7 @@ const useStore = create((set, get) => ({
       ],
     }));
     get().sendTopic(topic, trimmed);
-    if (get()._replyIsSpoken()) set({ assistantSpeaking: true });
+    if (get()._replyIsSpoken()) get()._armGate();
   },
 
   /** Whether this session actually produces a reply whose end we can wait for.
@@ -152,9 +234,50 @@ const useStore = create((set, get) => ({
   /** Mic toggle (HuRI/ATP.xlsx F5/F6). */
   beginListening: () => {
     get()._resetTurn();
-    set({ recording: true, assistantSpeaking: false, _micBuffer: [] });
+    get()._releaseGate();
+    get()._stopFinishing();
+    set({
+      recording: true,
+      _micBuffer: [],
+      micGated: false,
+      micNotice: "",
+      liveTranscript: "",
+      lastFinalTranscript: "",
+    });
   },
-  stopListening: () => set({ recording: false, assistantSpeaking: false }),
+  /** Mic closed: the utterance is over, whatever HuRI's VAD thinks.
+   *
+   * HuRI's MIC closes a turn after `silence_duration` of non-speech — and we
+   * just stopped streaming, so that silence never reaches it. Left alone, the
+   * turn stays open: no final transcript, no question, and the frames of the
+   * next recording get glued onto this one as a continuation. So tell HuRI
+   * explicitly (an empty audio.in frame, see useWebSocket's sendAudioEnd —
+   * HuRI/src/modules/speech_to_text/microphone_vad.py `MIC.flush`): it
+   * closes the turn at once and STT transcribes what was
+   * said so far, falling back to its partials if the final pass fails. That
+   * final transcript (and then the question) is what ends `finishing`; if it
+   * never comes, the watchdog does. Must run AFTER the capture has stopped
+   * (stopMic), so the marker really is the last thing on the socket. */
+  stopListening: () => {
+    get()._releaseGate();
+    set({ recording: false, micGated: false });
+    if (get().sendAudioEnd?.() !== true) {
+      // Not connected: nothing was sent, so nothing is coming back.
+      get()._stopFinishing();
+      set({ liveTranscript: "" });
+      return;
+    }
+    const prev = get()._finishTimer;
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      if (!get().finishing) return;
+      console.warn(
+        `no final transcript within ${FINISH_WATCHDOG_MS / 1000}s of closing the mic — giving up`,
+      );
+      set({ finishing: false, _finishTimer: null });
+    }, FINISH_WATCHDOG_MS);
+    set({ finishing: true, _finishTimer: timer });
+  },
 
   /** "question" hook message: a voice utterance was fully transcribed and
    * (if the emotion modules are active) linked to its prosody read — closes
@@ -178,13 +301,15 @@ const useStore = create((set, get) => ({
     const now = Date.now();
     const micBuffer = get()._micBuffer;
     get()._resetTurn();
+    get()._stopFinishing();
     const audio = micBuffer.length
       ? { samples: int16FramesToFloat32(micBuffer), sampleRate: 16000 }
       : null;
+    // Close the mic for the reply we just triggered (see `assistantSpeaking`).
+    if (get()._replyIsSpoken()) get()._armGate();
     set((s) => ({
       _micBuffer: [],
-      // Close the mic for the reply we just triggered (see `assistantSpeaking`).
-      assistantSpeaking: get()._replyIsSpoken(),
+      liveTranscript: "",
       messages: [
         ...s.messages,
         {
@@ -211,6 +336,7 @@ const useStore = create((set, get) => ({
 
   /** "token" hook message: streamed RAG answer text. */
   onToken: ({ text, end }) => {
+    get()._touchGate();
     set((s) => {
       const messages = [...s.messages];
       const last = messages[messages.length - 1];
@@ -225,6 +351,7 @@ const useStore = create((set, get) => ({
 
   /** "audio" hook message: one TTS chunk. */
   onAudio: ({ data, sampleRate, pts, end }) => {
+    get()._touchGate();
     scheduleChunk(data, sampleRate, pts);
     if (data.length) {
       set((s) => {
@@ -263,7 +390,7 @@ const useStore = create((set, get) => ({
     });
     // Reply finished: reopen the mic. Composer still holds it until the audio
     // already queued ahead on the pts clock has drained.
-    set({ assistantSpeaking: false });
+    get()._releaseGate();
   },
 
   // --- chat ------------------------------------------------------------
