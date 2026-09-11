@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import useStore from "../store/index.js";
 import { BACKEND_URL } from "../config.js";
+import { saveSessionModules } from "../persist.js";
 
 // Derive the websocket endpoint from the same backend origin the rest of the
 // app uses (see config.js).
@@ -31,7 +32,10 @@ function decodeAudio(b64) {
  * `initialModules` seeds the first handshake; calling the store's
  * `reconfigure(modules)` (wired up here) tears down the connection and opens
  * a fresh one with a new module combination — this is what the Event
- * Configuration modal's Apply button drives (HuRI/ATP.xlsx F1/F2).
+ * Configuration modal's Apply button drives (HuRI/ATP.xlsx F1/F2). Every
+ * combination applied this way is also remembered on this device (see
+ * persist.js), which is where App.jsx gets `initialModules` from on the next
+ * page load.
  *
  * `enabled` gates whether a connection is attempted at all: HuRI is started
  * on demand from the Control Panel (see App.jsx / LauncherPanel.jsx) rather
@@ -56,7 +60,10 @@ export function useWebSocket(initialModules, { enabled = true } = {}) {
   } = useStore.getState();
 
   useEffect(() => {
-    setReconfigure((next) => setModules(next));
+    setReconfigure((next) => {
+      saveSessionModules(next);
+      setModules(next);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -118,7 +125,12 @@ export function useWebSocket(initialModules, { enabled = true } = {}) {
           onMotionSegment(msg);
           break;
         case "error":
-          setStatusMessage(`Error: ${msg.message}`);
+          // A remembered combination can stop being valid — e.g. HuRI was
+          // relaunched with a config that no longer deploys tts/gesture — so
+          // point at the way out rather than leave a bare error.
+          setStatusMessage(
+            `Error: ${msg.message} — pick another module combination in Event Configuration (⚙).`,
+          );
           setConnectionStatus("error");
           break;
         default:

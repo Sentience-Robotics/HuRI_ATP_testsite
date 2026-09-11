@@ -1,7 +1,16 @@
 import { create } from "zustand";
 import { resetUtterance, scheduleChunk } from "../audio/playback.js";
+import { clearStoredMessages, loadMessages, saveMessages } from "../persist.js";
 
-let nextId = 1;
+// The transcript this device kept from before the last page load (see
+// persist.js) — seeds `messages` so a refresh resumes the conversation on
+// screen instead of wiping it and re-showing the empty-state greeting.
+const RESTORED_MESSAGES = loadMessages();
+
+// Ids only need to be unique within this tab's transcript, restored entries
+// included — so keep counting from past whatever was restored.
+let nextId =
+  1 + RESTORED_MESSAGES.reduce((max, m) => Math.max(max, Number(m.id.slice(1)) || 0), 0);
 const newId = () => `m${nextId++}`;
 
 /** Concatenate Int16 mic frames captured during a recording into one Float32
@@ -258,14 +267,44 @@ const useStore = create((set, get) => ({
   },
 
   // --- chat ------------------------------------------------------------
-  messages: [],
+  messages: RESTORED_MESSAGES,
+  /** How many leading `messages` came back from storage rather than from this
+   * page load's session — ChatPanel draws the "restored" divider after them.
+   * HuRI's own short-term history (RAG's per-connection `history`) did not
+   * survive the reload, only what it saved to long-term memory on session
+   * end, so it's worth making that boundary visible to a tester. */
+  restoredCount: RESTORED_MESSAGES.length,
   toggleExpanded: (id) =>
     set((s) => ({
       messages: s.messages.map((m) =>
         m.id === id ? { ...m, expanded: !m.expanded } : m,
       ),
     })),
+  /** Wipe the transcript, on screen and in this device's storage. */
+  clearMessages: () => {
+    clearStoredMessages();
+    set({ messages: [], restoredCount: 0, _sentQuestions: [] });
+  },
 }));
+
+// Mirror the transcript into storage as it changes. Streaming replies touch
+// `messages` once per token, so coalesce bursts — and flush on pagehide so a
+// refresh mid-reply doesn't lose the tokens that arrived inside the window.
+let persistTimer = null;
+const flushMessages = () => {
+  if (persistTimer === null) return;
+  clearTimeout(persistTimer);
+  persistTimer = null;
+  saveMessages(useStore.getState().messages);
+};
+useStore.subscribe((state, prev) => {
+  if (state.messages === prev.messages) return;
+  if (persistTimer !== null) clearTimeout(persistTimer);
+  persistTimer = setTimeout(flushMessages, 250);
+});
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushMessages);
+}
 
 function concatFloat32(a, b) {
   const out = new Float32Array(a.length + b.length);

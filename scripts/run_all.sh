@@ -87,7 +87,7 @@ pids+=("$!")
 echo
 if [ ${#HOST_FLAGS[@]} -gt 0 ]; then
   echo "Backend and frontend are up. HuRI itself is NOT started — open"
-  echo "http://$HOST_ARG:5173 (e.g. from your phone) and use the HuRI"
+  echo "https://$HOST_ARG:5173 (e.g. from your phone) and use the HuRI"
   echo "Control Panel (it opens automatically) to pick a config and start"
   echo "it. Ctrl-C here stops everything cleanly, including HuRI if you"
   echo "started it."
@@ -97,4 +97,9 @@ else
   echo "automatically) to pick a config and start it. Ctrl-C here stops"
   echo "everything cleanly, including HuRI if you started it."
 fi
+echo
+echo "Each device/browser gets its own HuRI user_id (RAG memory) on first visit;"
+echo "the backend logs 'Frontend connected (user_id=...)' per session and the"
+echo "site's top bar shows it (👤 pill). The picked module set and the chat are"
+echo "remembered per device across reloads."
 wait

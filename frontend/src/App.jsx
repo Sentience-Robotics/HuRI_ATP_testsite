@@ -4,14 +4,18 @@ import ChatPanel from "./components/ChatPanel.jsx";
 import Composer from "./components/Composer.jsx";
 import EventConfigModal from "./components/EventConfigModal.jsx";
 import LauncherPanel from "./components/LauncherPanel.jsx";
+import UserIdPill from "./components/UserIdPill.jsx";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 import { useHuriStatus } from "./hooks/useHuriStatus.js";
 import useStore from "./store/index.js";
 import { BACKEND_URL } from "./config.js";
+import { loadSessionModules, modulesEqual, saveSessionModules } from "./persist.js";
 
 // A minimal, guaranteed-valid first handshake (mirrors backend/huri_presets.py's
 // TEXT_ONLY) so the app connects immediately; the Event Configuration modal
 // offers the full named presets (fetched from /presets) to switch afterwards.
+// Only used the very first time on a device — after that the last applied
+// combination is remembered (persist.js) and seeds the handshake instead.
 const DEFAULT_MODULES = {
   rag: { name: "rag", args: { language: "en", tone: "formal", response_format: "short" } },
 };
@@ -92,18 +96,27 @@ function TestingApp({ user }) {
     }
   }, [huriRunning]);
 
-  useWebSocket(DEFAULT_MODULES, { enabled: huriRunning });
+  // Whatever combination this device last applied (Event Configuration Apply,
+  // or a `?preset=` tab) — so a refresh comes back with the same modules
+  // rather than dropping to rag-only and making the tester pick again.
+  const [initialModules] = useState(() => loadSessionModules() || DEFAULT_MODULES);
+  useWebSocket(initialModules, { enabled: huriRunning });
 
   const connectionStatus = useStore((s) => s.connectionStatus);
   const statusMessage = useStore((s) => s.statusMessage);
   const hasModule = useStore((s) => s.hasModule);
   const reconfigure = useStore((s) => s.reconfigure);
+  const clearMessages = useStore((s) => s.clearMessages);
+  const hasMessages = useStore((s) => s.messages.length > 0);
   const showAvatar = hasModule("gesture");
 
   // A tab opened from the Control Panel's "Open client tab" (LauncherPanel.jsx)
   // carries `?preset=<name>` — apply it once `reconfigure` is wired up (after
-  // the initial DEFAULT_MODULES handshake) so this client starts pre-configured
-  // instead of requiring a manual Event Configuration step.
+  // the initial handshake) so this client starts pre-configured instead of
+  // requiring a manual Event Configuration step. The URL wins over what the
+  // device remembered (it's the more explicit intent); when the two already
+  // agree — the usual case on a refresh — the first handshake used it, so
+  // don't tear that session down just to open an identical one.
   const appliedPresetFromUrl = useRef(false);
   useEffect(() => {
     if (appliedPresetFromUrl.current || !reconfigure) return;
@@ -113,32 +126,45 @@ function TestingApp({ user }) {
     fetch(`${BACKEND_URL}/presets`, { credentials: "include" })
       .then((r) => r.json())
       .then((presets) => {
-        if (presets[presetName]) reconfigure(presets[presetName]);
+        const preset = presets[presetName];
+        if (!preset) return;
+        if (modulesEqual(preset, initialModules)) saveSessionModules(preset);
+        else reconfigure(preset);
       })
       .catch(() => {});
-  }, [reconfigure]);
+  }, [reconfigure, initialModules]);
 
   return (
     <div className="app-shell">
       <div className="app-topbar">
         <div className="app-brand">
-          <span className="app-brand-icon">🌼</span> HuRI testing console
+          <span className="app-brand-icon">🌼</span>
+          <span className="app-brand-text">HuRI testing console</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div className="app-topbar-actions">
           <span
             className={`status-pill ${connectionStatus}`}
             title={statusMessage}
           >
             {STATUS_LABELS[connectionStatus] ?? connectionStatus}
           </span>
+          <UserIdPill userId={user?.user_id} source={user?.user_id_source} />
           <button
             type="button"
-            className="status-pill"
-            style={{ border: "none" }}
+            className="status-pill status-pill-button"
             onClick={() => setLauncherOpen(true)}
             title="Launch HuRI with a config and connect client(s) (HuRI/ATP.xlsx F1-F11)"
           >
-            HuRI Control Panel
+            <span className="hide-narrow">HuRI </span>Control Panel
+          </button>
+          <button
+            type="button"
+            className="status-pill status-pill-button"
+            onClick={clearMessages}
+            disabled={!hasMessages}
+            title="Clear the conversation shown here (it is remembered on this device across reloads)"
+          >
+            🗑<span className="hide-narrow"> Clear chat</span>
           </button>
           {user?.authenticated && (
             <a

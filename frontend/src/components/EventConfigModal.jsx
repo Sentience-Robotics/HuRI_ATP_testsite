@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import useStore from "../store/index.js";
 import { BACKEND_URL } from "../config.js";
 import { useAvailableModules, presetIsAvailable } from "../hooks/useAvailableModules.js";
+import { modulesEqual } from "../persist.js";
 
 // Mirrors HuRI/src/interfaces/web_interface.py's KNOWN_MODULES allow-list,
 // with a default args block per module (matching HuRI/config/client_full.yaml)
@@ -50,8 +51,17 @@ export default function EventConfigModal({ onClose }) {
   useEffect(() => {
     fetch(`${BACKEND_URL}/presets`)
       .then((r) => r.json())
-      .then(setPresets)
+      .then((loaded) => {
+        setPresets(loaded);
+        // Show the name of what's actually running (e.g. after a reload
+        // restored it) instead of always opening on "Custom combination".
+        const current = Object.entries(loaded).find(([, preset]) =>
+          modulesEqual(preset, sessionConfig?.modules),
+        );
+        if (current) setPresetName(current[0]);
+      })
       .catch(() => setPresets({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const isAvailable = (name) => !availableModules || availableModules.includes(name);

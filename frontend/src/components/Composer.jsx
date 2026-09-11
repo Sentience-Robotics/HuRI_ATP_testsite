@@ -100,13 +100,27 @@ export default function Composer({ onOpenSettings }) {
     }
   };
 
+  // Layout hooks for theme.css: on narrow screens the composer becomes a
+  // two-row grid (text + mic + send on top, topic picker + level + settings
+  // below) so the prompt gets the width; the modifier classes tell the grid
+  // which of the optional controls exist so it doesn't reserve empty columns.
+  const composerClass = [
+    "composer",
+    canAudio ? "" : "no-mic",
+    options.length > 0 ? "" : "no-topic",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className="composer">
+    <div className={composerClass}>
       {options.length > 0 && (
         <select
           className="composer-select"
           value={activeTopic}
           onChange={(e) => setTopic(e.target.value)}
+          title="Which HuRI topic a typed message is published on (rag.in = through RAG, rag.out = straight to TTS/gesture)"
+          aria-label="Target topic"
         >
           {options.map((t) => (
             <option key={t} value={t}>
@@ -158,7 +172,7 @@ export default function Composer({ onOpenSettings }) {
 
       <button
         type="button"
-        className="icon-button"
+        className="icon-button settings-button"
         onClick={onOpenSettings}
         title="Event Configuration"
       >

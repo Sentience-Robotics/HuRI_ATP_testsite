@@ -81,10 +81,19 @@ Both scripts auto-detect the HuRI checkout (the submodule at `HuRI/`, falling ba
 `serve`/`ray` binaries at that checkout's own venv. Override with `HURI_REPO_PATH` if yours lives
 somewhere else.
 
-By default `REQUIRE_AUTH=0` (`run_all.sh` sets this) — no Authelia needed, every visitor shares
-one open session whose RAG identity is a UUID generated once and saved to `.huri_user_id`, so the
-assistant's memory survives a backend restart. See **Auth** below to turn on the real login flow,
-and **RAG identity** for how that UUID is resolved.
+By default `REQUIRE_AUTH=0` (`run_all.sh` sets this) — no Authelia needed. Each device/browser
+that reaches the site gets its own HuRI `user_id` (a UUID issued on first visit and kept in a
+cookie), so with `--host` your phone and your laptop each have their own RAG memory, and it
+survives a backend restart. The id is shown in the top bar (👤 pill — hover for the full value,
+click to copy) and logged by the backend on every connection. See **Auth** below to turn on the
+real login flow, and **RAG identity** for how the id is resolved.
+
+The site also remembers, per device, the last module combination you applied and the chat
+transcript, so refreshing the page (or reopening it on the phone) comes back where you were
+instead of re-handshaking with the rag-only default and showing the greeting again. **Clear
+chat** in the top bar wipes the transcript. Note that HuRI's *short-term* context (RAG's
+per-connection history) does restart on a reload — a divider in the chat marks the boundary;
+only what HuRI saved to long-term memory when the previous session ended carries over.
 
 ## Configuring HuRI (the Control Panel)
 
@@ -130,7 +139,7 @@ Three modes, picked by what's set in the backend's environment (see `backend/mai
 
 | Mode | Set | Behaviour |
 |---|---|---|
-| Open (local dev) | `REQUIRE_AUTH=0` | No login screen; every session shares one `user_id` — the persisted UUID from `.huri_user_id` (see **RAG identity**). |
+| Open (local dev) | `REQUIRE_AUTH=0` | No login screen; each device/browser gets its own `user_id` — a UUID issued on first visit and carried in the session cookie (see **RAG identity**). |
 | Authelia (OIDC) | `REQUIRE_AUTH=1`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SESSION_SECRET` | Real login via `/auth/login`; the OIDC `sub` becomes the HuRI `user_id` (scopes RAG memory per user). |
 | Magic link (demo) | `MAGIC_LINK_SECRET` | A signed token redeemed at `/auth/magic` drops the same session an OIDC login would, without running Authelia. The minting tool `main.py` refers to (`tools/make_magic_qr.py`) doesn't exist yet — see **Known gaps**. |
 
@@ -145,14 +154,24 @@ assistant remember someone across sessions. `resolve_user_id()` in `backend/main
 order:
 
 1. **the authenticated OIDC `sub`** — the real identity, one RAG partition per user;
-2. **`HURI_USER_ID`** — an explicit override, to pin a session to a known partition (e.g. one you
-   already ingested documents into);
-3. **a UUID generated once and persisted** to `HURI_USER_ID_FILE` (default `<repo root>/.huri_user_id`,
-   written `0600`, gitignored) — so an unauthenticated backend keeps the same memory across restarts.
+2. **`HURI_USER_ID`** — an explicit override, to pin every session to a known partition (e.g. one
+   you already ingested documents into);
+3. **a per-device UUID** — minted by `GET /auth/me` on a browser's first visit (the first request
+   the SPA makes on every page load) and carried in the signed session cookie from then on. This
+   is what open mode (`REQUIRE_AUTH=0`) runs on: one partition per phone/laptop/browser. It lasts
+   as long as the cookie does — a year of inactivity by default (`SESSION_MAX_AGE`), refreshed on
+   every visit — so clearing site data, or using another browser on the same phone, means a fresh
+   identity;
+4. **a UUID generated once and persisted** to `HURI_USER_ID_FILE` (default `<repo root>/.huri_user_id`,
+   written `0600`, gitignored) — the fallback for a websocket that arrives with no session cookie
+   at all (a raw client that never called `/auth/me`).
 
-(3) is a single shared identity for everyone who reaches the site, so it's a dev/demo stopgap, not
-multi-user — use Authelia for that. `GET /auth/me` reports the resolved `user_id`, which is the
-quick way to tell "HuRI forgot me" apart from "I'm talking to a different partition".
+`GET /auth/me` reports the resolved `user_id` and its `user_id_source` (`oidc` / `env` / `device` /
+`shared`); the top bar's 👤 pill shows the same, and the backend logs
+`Frontend connected (user_id=…, source=…)` per session — the quick way to tell "HuRI forgot me"
+apart from "I'm talking to a different partition". Per-device ids are still not *authenticated*
+(anyone holding the cookie is that device), so it's a dev/demo scheme, not multi-user — use
+Authelia for that.
 
 For a containerised deploy, point `HURI_USER_ID_FILE` at a mounted volume — otherwise the UUID is
 regenerated on every image rebuild. To share one identity with HuRI's CLI client
@@ -170,8 +189,9 @@ regenerated on every image rebuild. To share one identity with HuRI's CLI client
 | `HURI_PRESETS_DIR` | `<repo root>/presets` | Where `/presets` and the Control Panel's config list are scanned from |
 | `VITE_BACKEND_URL` | `http://localhost:8001` | Backend origin the frontend talks to (build-time env var) |
 | `REQUIRE_AUTH` | `0` in `run_all.sh`, `1` otherwise | See **Auth** above |
-| `HURI_USER_ID` | unset | Pins the HuRI `user_id` / RAG partition explicitly; see **RAG identity** |
-| `HURI_USER_ID_FILE` | `<repo root>/.huri_user_id` | Where the fallback persisted UUID is stored; see **RAG identity** |
+| `HURI_USER_ID` | unset | Pins the HuRI `user_id` / RAG partition explicitly for every visitor; see **RAG identity** |
+| `HURI_USER_ID_FILE` | `<repo root>/.huri_user_id` | Where the cookie-less fallback UUID is stored; see **RAG identity** |
+| `SESSION_MAX_AGE` | 1 year (`REQUIRE_AUTH=0`), 14 days otherwise | Session-cookie lifetime, in seconds — in open mode that is how long a device keeps its `user_id` without visiting |
 
 ## Known gaps
 

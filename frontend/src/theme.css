@@ -79,12 +79,36 @@ button:disabled {
   font-size: 18px;
 }
 
+.app-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .status-pill {
   font-size: 12px;
   padding: 4px 10px;
   border-radius: 999px;
   background: var(--panel-raised);
   color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.status-pill-button {
+  border: none;
+  line-height: inherit;
+}
+
+.status-pill-button:hover:not(:disabled) {
+  background: var(--input-bg-hover);
+  color: var(--text);
+}
+
+/* The HuRI user_id / RAG partition this browser talks as (UserIdPill.jsx). */
+.user-id-pill .user-id-short {
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
 }
 
 .status-pill.connected {
@@ -131,6 +155,25 @@ button:disabled {
   color: var(--text-faint);
   font-size: 14px;
   text-align: center;
+}
+
+/* Boundary between the transcript restored from this device and the live
+   session (ChatPanel.jsx). */
+.chat-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.chat-divider::before,
+.chat-divider::after {
+  content: "";
+  flex: 1;
+  min-width: 16px;
+  border-top: 1px solid var(--border);
 }
 
 .avatar-panel {
@@ -298,13 +341,25 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+/* Topic picker (rag.in / rag.out / audio.in): a compact chip, not a
+   full-size field — the text input is what should get the room. */
 .composer-select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 108px;
   border: 1px solid var(--border);
   background: var(--input-bg);
   border-radius: var(--radius-sm);
-  padding: 9px 10px;
-  font-size: 13px;
-  min-width: 96px;
+  padding: 8px 8px;
+  font-size: 12px;
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  color: var(--text-muted);
+}
+
+.composer-select:hover {
+  background: var(--input-bg-hover);
+  color: var(--text);
 }
 
 .composer-input {
@@ -497,4 +552,121 @@ button:disabled {
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* --- narrow screens (phones via run_all.sh --host) ---------------------- */
+
+@media (max-width: 640px) {
+  .app-topbar {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  .app-topbar-actions {
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .app-brand-text,
+  .hide-narrow {
+    display: none;
+  }
+
+  .status-pill {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+
+  /* Full preset: the avatar goes above the chat instead of beside it —
+     side by side leaves neither enough width on a phone. */
+  .app-body {
+    flex-direction: column-reverse;
+  }
+
+  .avatar-panel {
+    width: 100%;
+    height: 34dvh;
+    flex-shrink: 0;
+    border-left: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .chat-panel {
+    padding: 12px 12px 8px;
+    gap: 12px;
+  }
+
+  .bubble-stack {
+    max-width: 86%;
+  }
+
+  /* Two rows: the prompt (plus mic + send) gets the full width on top, the
+     topic picker / level meter / settings sit underneath. The no-mic /
+     no-topic variants drop the columns that would otherwise stay empty
+     (Composer.jsx sets them). */
+  .composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "input mic send"
+      "select level gear";
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .composer.no-mic {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "input send"
+      "select gear";
+  }
+
+  .composer.no-topic.no-mic {
+    grid-template-areas:
+      "input send"
+      ". gear";
+  }
+
+  .composer-input {
+    grid-area: input;
+  }
+
+  .mic-button {
+    grid-area: mic;
+  }
+
+  .send-button {
+    grid-area: send;
+  }
+
+  .composer-select {
+    grid-area: select;
+    justify-self: start;
+    max-width: none;
+  }
+
+  .composer-mic-level {
+    grid-area: level;
+    justify-self: center;
+  }
+
+  .settings-button {
+    grid-area: gear;
+  }
+
+  .modal-card {
+    width: min(560px, 94vw);
+    max-height: 88dvh;
+    padding: 18px 16px;
+  }
+
+  .modal-title {
+    font-size: 18px;
+    margin-bottom: 14px;
+  }
+
+  .module-row input {
+    min-width: 0;
+  }
 }

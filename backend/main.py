@@ -28,6 +28,7 @@ Frontend <-> backend protocol on ``/ws`` (unchanged from before this refactor):
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict
 
@@ -128,35 +129,50 @@ COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax").lower()
 #
 # Precedence:
 #   1. the authenticated OIDC `sub` — the real identity, one partition per user;
-#   2. HURI_USER_ID — an explicit override (pin a session to a known partition,
-#      e.g. one you ingested documents into);
-#   3. a UUID generated once and persisted to disk, so an unauthenticated
-#      backend still keeps the same memory across restarts.
+#   2. HURI_USER_ID — an explicit override (pin every visitor to a known
+#      partition, e.g. one you ingested documents into);
+#   3. a per-device UUID, minted by /auth/me on a browser's first visit and
+#      carried in the signed session cookie from then on — so with
+#      REQUIRE_AUTH=0 each phone/laptop that reaches the site (run_all.sh
+#      --host) gets its own memory partition instead of everyone sharing one;
+#   4. a UUID generated once and persisted to disk — the fallback for a
+#      websocket that arrives with no session cookie at all (a raw client that
+#      never called /auth/me), so it still lands on a stable partition.
 #
-# (3) is a single shared identity for everyone who reaches the site, which is
-# why it only applies with REQUIRE_AUTH=0 — it is a development/demo stopgap,
-# not multi-user. Without it the fallback was the literal string "anonymous",
-# which works but gives every deployment the same partition key.
+# (3) is what `run_all.sh --host` relies on: the cookie is what identifies a
+# device, so clearing site data (or a different browser on the same phone)
+# means a fresh identity. The id is shown in the site's top bar and logged on
+# every websocket connect ("Frontend connected (user_id=..., source=device)"),
+# which is how you tell which partition a given run is talking to.
 #
-# The file defaults to <repo root>/.huri_user_id (already gitignored). Point
-# HURI_USER_ID_FILE at a mounted volume for a containerised deploy, or at
-# HuRI's own ~/.config/huri/_user_id to share one identity with HuRI's CLI
-# client (src/client.py). Note HuRI's RAG ingestion CLI
+# The fallback file defaults to <repo root>/.huri_user_id (already
+# gitignored). Point HURI_USER_ID_FILE at a mounted volume for a containerised
+# deploy, or at HuRI's own ~/.config/huri/_user_id to share one identity with
+# HuRI's CLI client (src/client.py). Note HuRI's RAG ingestion CLI
 # (src/modules/rag/ingestion.py) reads ~/.huri_user_id instead, so line the two
 # up — or pass `--user-id` when ingesting — if you want documents you ingest to
 # land in the partition this site reads.
 USER_ID_FILE = Path(
     os.environ.get("HURI_USER_ID_FILE", str(_REPO_ROOT / ".huri_user_id"))
 )
+HURI_USER_ID_OVERRIDE = os.environ.get("HURI_USER_ID", "").strip()
+
+# Session key holding the per-device UUID (precedence step 3 above).
+DEVICE_ID_SESSION_KEY = "device_id"
 
 
-def resolve_user_id(sub: str | None = None) -> str:
-    """Return the stable HuRI `user_id` / RAG partition key for this session."""
+def resolve_user_id(
+    sub: str | None = None, device_id: str | None = None
+) -> tuple[str, str]:
+    """Return ``(user_id, source)`` — the stable HuRI `user_id` / RAG partition
+    key for this session and which precedence step produced it (``"oidc"``,
+    ``"env"``, ``"device"`` or ``"shared"``)."""
     if sub:
-        return sub
-    explicit = os.environ.get("HURI_USER_ID", "").strip()
-    if explicit:
-        return explicit
+        return sub, "oidc"
+    if HURI_USER_ID_OVERRIDE:
+        return HURI_USER_ID_OVERRIDE, "env"
+    if device_id:
+        return device_id, "device"
     # get_or_create_and_save_user_id writes the file when it is missing, so make
     # sure the directory exists first (HURI_USER_ID_FILE may name a fresh volume
     # path); the repo-root default always exists.
@@ -164,8 +180,26 @@ def resolve_user_id(sub: str | None = None) -> str:
     existed = USER_ID_FILE.exists()
     uid = get_or_create_and_save_user_id(str(USER_ID_FILE))
     if not existed:
-        logger.info("Generated new persistent user_id %s (saved to %s)", uid, USER_ID_FILE)
-    return uid
+        logger.info("Generated new shared fallback user_id %s (saved to %s)", uid, USER_ID_FILE)
+    return uid, "shared"
+
+
+def _ensure_device_id(request: Request) -> str | None:
+    """Mint (once per browser) the per-device UUID that becomes this visitor's
+    HuRI `user_id` when nothing higher-precedence applies. Only HTTP responses
+    can set cookies — a websocket accept can't — so this runs on /auth/me, the
+    first request the SPA makes on every page load. Skipped whenever the id
+    wouldn't be used anyway (signed in, HURI_USER_ID pinned, or auth required),
+    so the log line below means exactly "a new device just got its identity"."""
+    if REQUIRE_AUTH or HURI_USER_ID_OVERRIDE or request.session.get("sub"):
+        return None
+    device_id = request.session.get(DEVICE_ID_SESSION_KEY)
+    if not device_id:
+        device_id = str(uuid.uuid4())
+        request.session[DEVICE_ID_SESSION_KEY] = device_id
+        client = request.client.host if request.client else "?"
+        logger.info("Issued new per-device user_id %s to %s", device_id, client)
+    return device_id
 
 
 # --- Magic-link auto-login (passwordless QR sign-in for demos) --------------
@@ -214,11 +248,21 @@ app = FastAPI(title="HuRI Website")
 
 # SessionMiddleware backs the signed cookie that carries the OIDC `sub`; it is
 # read on both the HTTP auth routes and the /ws handshake.
+#
+# The cookie's lifetime is also the per-device identity's lifetime in open
+# mode (see `_ensure_device_id`), and Starlette re-issues it on every response,
+# so it only lapses after that long *without a visit*. Keep a real login
+# session at Starlette's 14-day default; with no login to expire, let a device
+# keep its RAG memory for a year of inactivity.
+SESSION_MAX_AGE = int(
+    os.environ.get("SESSION_MAX_AGE", "0") or "0"
+) or (14 * 24 * 3600 if REQUIRE_AUTH else 365 * 24 * 3600)
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
     same_site=COOKIE_SAMESITE,
     https_only=COOKIE_SECURE,
+    max_age=SESSION_MAX_AGE,
 )
 
 # Credentialed CORS: the browser attaches the session cookie on cross-origin
@@ -235,6 +279,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Say up front which identity rule this run is under, so the terminal running
+# run_all.sh / run_backend.sh tells you what user_id to expect before the first
+# browser even connects (per-connection ids are then logged as they arrive).
+if REQUIRE_AUTH:
+    logger.info("RAG identity: the signed-in OIDC `sub` of each visitor (REQUIRE_AUTH=1).")
+elif HURI_USER_ID_OVERRIDE:
+    logger.info("RAG identity: pinned to HURI_USER_ID=%s for every visitor.", HURI_USER_ID_OVERRIDE)
+else:
+    logger.info(
+        "RAG identity: one UUID per device/browser (issued on first visit, kept in the "
+        "session cookie; shown in the site's top bar). Cookie-less websocket clients "
+        "share the fallback id in %s.",
+        USER_ID_FILE,
+    )
 
 
 @app.get("/auth/login")
@@ -318,16 +377,22 @@ async def auth_logout(request: Request):
 async def auth_me(request: Request):
     """Tell the frontend whether the visitor is signed in."""
     sub = request.session.get("sub")
+    # Which RAG partition this visitor's session will read/write — the OIDC
+    # `sub` when signed in, otherwise (open mode) the per-device UUID minted
+    # here on first visit. Shown in the SPA's top bar, so a tester can tell
+    # "HuRI forgot me" apart from "I'm in a different partition".
+    user_id, source = (None, None)
+    if not (REQUIRE_AUTH and not sub):
+        user_id, source = resolve_user_id(sub, _ensure_device_id(request))
     return {
         "authenticated": bool(sub),
         "auth_required": REQUIRE_AUTH,
         "sub": sub,
         "email": request.session.get("email"),
         "name": request.session.get("name"),
-        # Which RAG partition this visitor's session will read/write — the OIDC
-        # `sub` when signed in, otherwise the persisted fallback UUID. Handy for
-        # telling "HuRI forgot me" apart from "I'm in a different partition".
-        "user_id": resolve_user_id(sub) if not (REQUIRE_AUTH and not sub) else None,
+        "user_id": user_id,
+        # "oidc" | "env" | "device" | "shared" — see resolve_user_id.
+        "user_id_source": source,
     }
 
 
@@ -476,8 +541,10 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     await ws.accept()
-    user_id = resolve_user_id(sub)
-    logger.info("Frontend connected (user_id=%s)", user_id)
+    # The per-device id (if any) was minted by /auth/me and rides in the same
+    # signed cookie; a socket without one falls back to the shared file UUID.
+    user_id, source = resolve_user_id(sub, ws.session.get(DEVICE_ID_SESSION_KEY))
+    logger.info("Frontend connected (user_id=%s, source=%s)", user_id, source)
 
     try:
         await run_browser_session(
@@ -487,7 +554,7 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     except Exception:
         logger.exception("Bridge error")
-    logger.info("Frontend disconnected (user_id=%s)", user_id)
+    logger.info("Frontend disconnected (user_id=%s, source=%s)", user_id, source)
 
 
 # Serve the built SPA (single-origin deploy). Mounted LAST so the API routes and

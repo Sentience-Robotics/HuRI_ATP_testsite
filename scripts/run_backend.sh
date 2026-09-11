@@ -95,5 +95,19 @@ if [ -n "$HURI_REPO_PATH" ] && [ -x "$HURI_REPO_PATH/.venv/bin/serve" ]; then
   export HURI_RAY_BIN="${HURI_RAY_BIN:-$HURI_REPO_PATH/.venv/bin/ray}"
 fi
 
+# Which HuRI user_id (RAG memory partition) sessions will run as — see the
+# "RAG identity" notes in main.py / README. In the default open mode every
+# device gets its own id, so the concrete value only shows up once a browser
+# connects: main.py logs "Frontend connected (user_id=..., source=...)" and
+# the site's top bar shows it (👤 pill, click to copy).
+if [ "$REQUIRE_AUTH" != "0" ]; then
+  echo "RAG identity: each visitor's signed-in OIDC sub (REQUIRE_AUTH=$REQUIRE_AUTH)"
+elif [ -n "${HURI_USER_ID:-}" ]; then
+  echo "RAG identity: pinned to HURI_USER_ID=$HURI_USER_ID for every visitor"
+else
+  echo "RAG identity: one UUID per device/browser, issued on first visit (watch for"
+  echo "  'Frontend connected (user_id=...)' below; the site's top bar shows it too)."
+fi
+
 echo "Starting FastAPI backend on http://localhost:8001 (HURI_REPO_PATH=$HURI_REPO_PATH)"
 uvicorn main:app --reload --host 0.0.0.0 --port 8001
